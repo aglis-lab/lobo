@@ -1,0 +1,13 @@
+[package]
+name = "lobo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anymap3 = "1.1.0"
+rand = "0.10.4"
+tokio = { version = "1.54.1", features = ["full"] }
+lobo-macros = { path = "lobo-macros" }
+
+[workspace]
+members = ["lobo-macros"]

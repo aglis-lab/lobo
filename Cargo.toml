@@ -8,6 +8,11 @@ anymap3 = "1.1.0"
 rand = "0.10.4"
 tokio = { version = "1.54.1", features = ["full"] }
 lobo-macros = { path = "lobo-macros" }
+log = "0.4.35"
 
 [workspace]
 members = ["lobo-macros"]
+
+[dev-dependencies]
+dotenvy = "0.15.7"
+env_logger = "0.11.12"

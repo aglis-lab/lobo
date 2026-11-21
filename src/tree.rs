@@ -4,7 +4,6 @@
 use std::cell::{Cell, RefCell};
 use std::fmt::Write;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::signal::{Observer, track};
 use crate::{Context, Widget};
@@ -14,7 +13,7 @@ pub struct Node {
     /// The context this node's widget is built in (set by its parent).
     context: Context,
     /// Replaced on every rebuild, which drops stale subscriptions.
-    observer: RefCell<Arc<Observer>>,
+    observer: RefCell<Rc<Observer>>,
     composite: Cell<bool>,
     kids: RefCell<Vec<Rc<Node>>>,
 }

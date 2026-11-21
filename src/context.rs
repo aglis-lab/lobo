@@ -21,16 +21,16 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::BufRead;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use anymap3::AnyMap;
 
 use crate::signal::set_waker;
 use crate::tree::Node;
 
-pub use widgets_macros::{Widget, ui};
+pub use lobo_macros::{Widget, ui};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -57,7 +57,7 @@ impl InnerContext for MapContext {
 
 /// Values provided by one `Provider`, chained to the scope above it.
 struct Scope {
-    values: AnyMap,
+    values: RefCell<AnyMap>,
     parent: Option<Rc<Scope>>,
 }
 
@@ -95,17 +95,17 @@ impl Context {
             inner: self.inner.clone(),
             dispatcher: self.dispatcher.clone(),
             scope: Some(Rc::new(Scope {
-                values,
+                values: RefCell::new(values),
                 parent: self.scope.clone(),
             })),
         }
     }
 
     /// Nearest provided `T` above this widget, if any.
-    pub fn try_read<T: 'static>(&self) -> Option<Arc<T>> {
+    pub fn try_read<T: 'static>(&self) -> Option<Rc<RefCell<T>>> {
         let mut scope = self.scope.as_deref();
         while let Some(s) = scope {
-            if let Some(value) = s.values.get::<Arc<T>>() {
+            if let Some(value) = s.values.borrow_mut().get::<Rc<RefCell<T>>>() {
                 return Some(value.clone());
             }
             scope = s.parent.as_deref();
@@ -114,7 +114,7 @@ impl Context {
     }
 
     /// Like `try_read`, but panics if no `Provider` of `T` is above.
-    pub fn read<T: 'static>(&self) -> Arc<T> {
+    pub fn read<T: 'static>(&self) -> Rc<RefCell<T>> {
         self.try_read().unwrap_or_else(|| {
             panic!(
                 "no Provider for `{}` above this widget",
@@ -125,6 +125,30 @@ impl Context {
 
     pub fn get(&self, key: &str) -> Option<String> {
         self.inner.get(key)
+    }
+
+    /// Runs an `!Send` future on the UI thread, so it can read and write
+    /// `Signal`s directly — no handle, no channel, no `Send`.
+    ///
+    /// The future is polled by the run loop, so an `.await` inside it does not
+    /// block the UI: whatever it awaits (IO, `spawn_blocking`, a channel fed by
+    /// another thread) runs elsewhere, and only `Send` data crosses back.
+    ///
+    /// ```ignore
+    /// let counter = context.read::<CounterState>();
+    /// context.spawn_local(async move {
+    ///     let data = fetch().await;              // on a worker thread
+    ///     counter.count.set(data);               // back on the UI thread
+    /// });
+    /// ```
+    ///
+    /// Panics if called outside `run` (there is no UI executor then).
+    pub fn run_async<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        tokio::task::spawn_local(future)
     }
 
     pub fn set(&self, key: &str, value: impl ToString) {
@@ -197,13 +221,30 @@ type UiTask = Box<dyn FnOnce(&Ui) + Send>;
 
 /// Sends closures to the UI thread, from any thread or task.
 #[derive(Clone)]
-pub struct Dispatcher(tokio::sync::mpsc::UnboundedSender<UiTask>);
+pub struct Dispatcher {
+    tx: tokio::sync::mpsc::UnboundedSender<UiTask>,
+    /// The thread that created this dispatcher, i.e. the UI thread.
+    ui_thread: std::thread::ThreadId,
+}
 
 impl Dispatcher {
+    fn new(tx: tokio::sync::mpsc::UnboundedSender<UiTask>) -> Self {
+        Dispatcher {
+            tx,
+            ui_thread: std::thread::current().id(),
+        }
+    }
+
     /// Queues `f` to run on the UI thread. Returns `false` if the app has
     /// already quit. After it runs, changed signals trigger a rebuild.
     pub fn run(&self, f: impl FnOnce(&Ui) + Send + 'static) -> bool {
-        self.0.send(Box::new(f)).is_ok()
+        self.tx.send(Box::new(f)).is_ok()
+    }
+
+    /// Whether the caller is already on the UI thread (where `run` would
+    /// queue work behind the code that is running right now).
+    pub fn is_ui_thread(&self) -> bool {
+        std::thread::current().id() == self.ui_thread
     }
 }
 
@@ -222,7 +263,7 @@ impl Ui<'_> {
 fn draw(root: &Node) {
     let mut out = String::new();
     root.paint(0, &mut out);
-    // No screen clear, so `println!` debugging inside `build` stays visible.
+    // No screen clear, so trace logs from `build` stay visible between frames.
     print!("{out}[+] increment  [-] decrement  [q] quit (press Enter after each)\n---\n");
 }
 
@@ -237,24 +278,26 @@ fn draw(root: &Node) {
 ///
 /// Input is line-buffered (no raw terminal mode), so keys take effect on Enter.
 pub fn run(app: impl Into<Widget>) {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
-    runtime.block_on(run_loop(app.into()));
+
+    let local = tokio::task::LocalSet::new();
+    runtime.block_on(local.run_until(run_loop(app.into())));
     set_waker(None);
 }
 
 async fn run_loop(app: Widget) {
     let (ui_tx, mut ui_tasks) = tokio::sync::mpsc::unbounded_channel::<UiTask>();
     let mut context = Context::default();
-    context.dispatcher = Some(Dispatcher(ui_tx));
+    context.dispatcher = Some(Dispatcher::new(ui_tx));
     let root = Node::mount(app, context);
 
-    let redraw = Arc::new(tokio::sync::Notify::new());
+    let redraw = Rc::new(tokio::sync::Notify::new());
     {
         let redraw = redraw.clone();
-        set_waker(Some(Arc::new(move || redraw.notify_one())));
+        set_waker(Some(Rc::new(move || redraw.notify_one())));
     }
 
     // Blocking stdin lives on its own thread; lines arrive over a channel.

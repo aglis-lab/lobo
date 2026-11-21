@@ -25,7 +25,7 @@ pub struct SignalBuilder {
 
 impl Element for SignalBuilder {
     fn build(&self, context: &Context) -> Option<Widget> {
-        println!("SignalBuilder being called");
+        log::trace!("SignalBuilder being called");
 
         self.builder.as_ref()(context)
     }

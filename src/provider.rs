@@ -10,8 +10,8 @@
 //! let state = context.read::<CounterState>();
 //! ```
 
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use anymap3::AnyMap;
 
@@ -32,9 +32,8 @@ where
 {
     fn from(create: F) -> Self {
         ProviderCreate(Rc::new(move |context, values| {
-            // Stored as `Arc<T>` so `read` hands out handles that tasks on other
-            // threads can hold (when `T: Send + Sync`).
-            values.insert(Arc::new(create(context)));
+            // Stored as `Rc<RefCell<T>>`, the type `Context::read` looks up.
+            values.insert(Rc::new(RefCell::new(create(context))));
         }))
     }
 }

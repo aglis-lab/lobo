@@ -102,10 +102,10 @@ impl Context {
     }
 
     /// Nearest provided `T` above this widget, if any.
-    pub fn try_read<T: 'static>(&self) -> Option<Rc<RefCell<T>>> {
+    pub fn try_read<T: 'static>(&self) -> Option<Rc<T>> {
         let mut scope = self.scope.as_deref();
         while let Some(s) = scope {
-            if let Some(value) = s.values.borrow_mut().get::<Rc<RefCell<T>>>() {
+            if let Some(value) = s.values.borrow_mut().get::<Rc<T>>() {
                 return Some(value.clone());
             }
             scope = s.parent.as_deref();
@@ -114,7 +114,7 @@ impl Context {
     }
 
     /// Like `try_read`, but panics if no `Provider` of `T` is above.
-    pub fn read<T: 'static>(&self) -> Rc<RefCell<T>> {
+    pub fn read<T: 'static>(&self) -> Rc<T> {
         self.try_read().unwrap_or_else(|| {
             panic!(
                 "no Provider for `{}` above this widget",
@@ -127,34 +127,33 @@ impl Context {
         self.inner.get(key)
     }
 
-    /// Runs an `!Send` future on the UI thread, so it can read and write
-    /// `Signal`s directly — no handle, no channel, no `Send`.
-    ///
-    /// The future is polled by the run loop, so an `.await` inside it does not
-    /// block the UI: whatever it awaits (IO, `spawn_blocking`, a channel fed by
-    /// another thread) runs elsewhere, and only `Send` data crosses back.
-    ///
-    /// ```ignore
-    /// let counter = context.read::<CounterState>();
-    /// context.spawn_local(async move {
-    ///     let data = fetch().await;              // on a worker thread
-    ///     counter.count.set(data);               // back on the UI thread
-    /// });
-    /// ```
-    ///
-    /// Panics if called outside `run` (there is no UI executor then).
-    pub fn run_async<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: Future + 'static,
-        F::Output: 'static,
-    {
-        tokio::task::spawn_local(future)
-    }
-
     pub fn set(&self, key: &str, value: impl ToString) {
         self.inner.set(key, value.to_string());
     }
 }
+
+/// Runs an `!Send` future on the UI thread, so it can read and write
+/// `Signal`s directly — no handle, no channel, no `Send`.
+///
+/// The future must own what it uses (no borrows of temporaries), so take the
+/// `Rc` from `context.read` and call a method that takes `self: Rc<Self>`:
+///
+/// ```ignore
+/// context.read::<CounterController>().decrease().run_async();
+/// ```
+///
+/// The future is polled by the run loop, so an `.await` inside it does not
+/// block the UI. Panics if called outside `run` (there is no UI executor).
+pub trait RunAsync: Future + Sized + 'static {
+    fn run_async(self) -> tokio::task::JoinHandle<Self::Output>
+    where
+        Self::Output: 'static,
+    {
+        tokio::task::spawn_local(self)
+    }
+}
+
+impl<F: Future + 'static> RunAsync for F {}
 
 impl Default for Context {
     fn default() -> Self {

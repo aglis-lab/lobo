@@ -10,7 +10,6 @@
 //! let state = context.read::<CounterState>();
 //! ```
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use anymap3::AnyMap;
@@ -32,8 +31,8 @@ where
 {
     fn from(create: F) -> Self {
         ProviderCreate(Rc::new(move |context, values| {
-            // Stored as `Rc<RefCell<T>>`, the type `Context::read` looks up.
-            values.insert(Rc::new(RefCell::new(create(context))));
+            // Stored as `Rc<T>`, the type `Context::read` looks up.
+            values.insert(Rc::new(create(context)));
         }))
     }
 }

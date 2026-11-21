@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::time::Duration;
 
 use lobo::*;
@@ -24,13 +25,15 @@ impl CounterService {
 }
 
 impl CounterController {
-    async fn increment(&self) {
+    // `self: Rc<Self>` lets the returned future own the controller, so it can
+    // be spawned with `.run_async()` from a temporary handle.
+    async fn increment(self: Rc<Self>) {
         let multiply = self.counter_service.get_multiply().await;
 
         self.counter_state.count.update(|c| *c += multiply);
     }
 
-    async fn decrease(&self) {
+    async fn decrease(self: Rc<Self>) {
         let multiply = self.counter_service.get_multiply().await;
 
         self.counter_state.count.update(|c| *c -= multiply);
@@ -66,17 +69,10 @@ impl Element for Hello {
             _ => return,
         };
 
-        // Own the controller handle inside the future so it is `'static`.
-        let controller = context.read::<CounterController>();
-
         if sign > 0 {
-            context.run_async(async move {
-                controller.borrow().increment().await;
-            });
+            context.read::<CounterController>().increment().run_async();
         } else {
-            context.run_async(async move {
-                controller.borrow().decrease().await;
-            });
+            context.read::<CounterController>().decrease().run_async();
         }
     }
 
@@ -94,7 +90,7 @@ impl Element for Hello {
                         SignalBuilder(
                             builder: |context: &Context| {
                                 // Reading the signal here subscribes this node to it.
-                                let count = context.read::<CounterController>().borrow().counter_state.count.get();
+                                let count = context.read::<CounterController>().counter_state.count.get();
 
                                 Some(ui!(Text(text: format!("Count: {count}"))).into())
                             }

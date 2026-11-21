@@ -51,8 +51,9 @@ pub(crate) fn set_waker(waker: Option<Waker>) {
 }
 
 fn wake() {
-    // Cloned out first so the waker may itself touch signals.
-    if let Some(waker) = WAKER.take() {
+    // Cloned out first so the waker may itself touch signals. Cloning (not
+    // taking) keeps it installed for the next change.
+    if let Some(waker) = WAKER.with(|w| w.borrow().clone()) {
         waker();
     }
 }

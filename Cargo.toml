@@ -9,6 +9,9 @@ rand = "0.10.4"
 tokio = { version = "1.54.1", features = ["full"] }
 lobo-macros = { path = "lobo-macros" }
 log = "0.4.35"
+serde = "1.0.229"
+serde_json = "1.0.154"
+anyhow = "1.0.104"
 
 [workspace]
 members = ["lobo-macros"]

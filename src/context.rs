@@ -30,7 +30,7 @@ use anymap3::AnyMap;
 use crate::signal::set_waker;
 use crate::tree::Node;
 
-pub use lobo_macros::{Widget, ui};
+pub use lobo_macros::{Model, Widget, ui};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -67,7 +67,6 @@ struct Scope {
 pub struct Context {
     pub inner: Rc<dyn InnerContext>,
     scope: Option<Rc<Scope>>,
-    dispatcher: Option<Dispatcher>,
 }
 
 impl Context {
@@ -75,25 +74,13 @@ impl Context {
         Context {
             inner: Rc::new(inner),
             scope: None,
-            dispatcher: None,
         }
-    }
-
-    /// Handle for sending work back to the UI thread. It is `Send + Clone`,
-    /// so take it here (on the UI thread) and move it into a task.
-    ///
-    /// Panics if the context was not created by `run`.
-    pub fn dispatcher(&self) -> Dispatcher {
-        self.dispatcher
-            .clone()
-            .expect("this Context has no dispatcher (it is created by `run`)")
     }
 
     /// Child context that also sees `values`; shadows the same types above.
     pub fn with_scope(&self, values: AnyMap) -> Context {
         Context {
             inner: self.inner.clone(),
-            dispatcher: self.dispatcher.clone(),
             scope: Some(Rc::new(Scope {
                 values: RefCell::new(values),
                 parent: self.scope.clone(),
@@ -212,53 +199,6 @@ impl<E: Element + 'static> From<E> for Widget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// UI-thread dispatch
-// ---------------------------------------------------------------------------
-
-type UiTask = Box<dyn FnOnce(&Ui) + Send>;
-
-/// Sends closures to the UI thread, from any thread or task.
-#[derive(Clone)]
-pub struct Dispatcher {
-    tx: tokio::sync::mpsc::UnboundedSender<UiTask>,
-    /// The thread that created this dispatcher, i.e. the UI thread.
-    ui_thread: std::thread::ThreadId,
-}
-
-impl Dispatcher {
-    fn new(tx: tokio::sync::mpsc::UnboundedSender<UiTask>) -> Self {
-        Dispatcher {
-            tx,
-            ui_thread: std::thread::current().id(),
-        }
-    }
-
-    /// Queues `f` to run on the UI thread. Returns `false` if the app has
-    /// already quit. After it runs, changed signals trigger a rebuild.
-    pub fn run(&self, f: impl FnOnce(&Ui) + Send + 'static) -> bool {
-        self.tx.send(Box::new(f)).is_ok()
-    }
-
-    /// Whether the caller is already on the UI thread (where `run` would
-    /// queue work behind the code that is running right now).
-    pub fn is_ui_thread(&self) -> bool {
-        std::thread::current().id() == self.ui_thread
-    }
-}
-
-/// What a dispatched closure can reach on the UI thread.
-pub struct Ui<'a> {
-    root: &'a Node,
-}
-
-impl Ui<'_> {
-    /// Delivers a key press to every widget, as if typed.
-    pub fn key(&self, key: char) {
-        self.root.dispatch_key(key);
-    }
-}
-
 fn draw(root: &Node) {
     let mut out = String::new();
     root.paint(0, &mut out);
@@ -288,10 +228,7 @@ pub fn run(app: impl Into<Widget>) {
 }
 
 async fn run_loop(app: Widget) {
-    let (ui_tx, mut ui_tasks) = tokio::sync::mpsc::unbounded_channel::<UiTask>();
-    let mut context = Context::default();
-    context.dispatcher = Some(Dispatcher::new(ui_tx));
-    let root = Node::mount(app, context);
+    let root = Node::mount(app, Context::default());
 
     let redraw = Rc::new(tokio::sync::Notify::new());
     {
@@ -320,12 +257,6 @@ async fn run_loop(app: Widget) {
                         return;
                     }
                     root.dispatch_key(key);
-                }
-            }
-            // Work sent from another thread via `Dispatcher::run`.
-            task = ui_tasks.recv() => {
-                if let Some(task) = task {
-                    task(&Ui { root: &root });
                 }
             }
             // A signal changed outside of key handling (e.g. an async task).

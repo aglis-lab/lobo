@@ -30,13 +30,15 @@ impl CounterController {
     async fn increment(self: Rc<Self>) {
         let multiply = self.counter_service.get_multiply().await;
 
-        self.counter_state.count.update(|c| *c += multiply);
+        let count = self.counter_state.count.peek();
+        self.counter_state.count.set(count + multiply);
     }
 
     async fn decrease(self: Rc<Self>) {
         let multiply = self.counter_service.get_multiply().await;
 
-        self.counter_state.count.update(|c| *c -= multiply);
+        let count = self.counter_state.count.peek();
+        self.counter_state.count.set(count - multiply);
     }
 }
 
@@ -61,11 +63,6 @@ impl Element for Hello {
         let sign = match key {
             '+' => 1,
             '-' => -1,
-            '!' => {
-                // Arrived via `Dispatcher::run` from a worker thread.
-                log::trace!("callback handled on {:?}", std::thread::current().id());
-                return;
-            }
             _ => return,
         };
 

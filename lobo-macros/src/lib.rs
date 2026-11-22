@@ -13,6 +13,8 @@
 //!
 //! `#[widget(optional)]` on the struct makes every field optional.
 
+mod model;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote, quote_spanned};
@@ -25,6 +27,17 @@ use syn::{
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// `#[derive(Model)]`: `to_json`, `from_json` and serde impls.
+/// See `model.rs`.
+#[proc_macro_derive(Model)]
+pub fn derive_model(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match model::expand(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

@@ -109,14 +109,21 @@ impl<T> Signal<T> {
         f(&self.0.borrow().value)
     }
 
-    pub fn set(&self, value: T) {
-        self.update(|v| *v = value);
+    /// Like `with`, but does not subscribe. Reading with `peek_with` never causes a rebuild.
+    pub fn peek_with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        f(&self.0.borrow().value)
     }
+}
 
-    pub fn update(&self, f: impl FnOnce(&mut T)) {
+impl<T: Clone + PartialEq> Signal<T> {
+    /// Replaces the value. Subscribers are only notified if it actually changed.
+    pub fn set(&self, value: T) {
         let subscribers = {
             let mut inner = self.0.borrow_mut();
-            f(&mut inner.value);
+            if inner.value == value {
+                return;
+            }
+            inner.value = value;
             // Dirty observers rebuild with a fresh observer and re-subscribe.
             std::mem::take(&mut inner.subscribers)
         };
@@ -133,7 +140,51 @@ impl<T> Signal<T> {
 }
 
 impl<T: Clone> Signal<T> {
+    /// Clones the value and subscribes the current observer, if any.
     pub fn get(&self) -> T {
         self.with(T::clone)
+    }
+
+    /// Clones the value without subscribing. Use it for reads that must not cause a rebuild,
+    /// such as reading a value inside an event handler.
+    pub fn peek(&self) -> T {
+        self.peek_with(T::clone)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_value_does_not_notify_subscribers() {
+        let signal = Signal::new(1);
+        let observer = Observer::new();
+        track(&observer, || signal.get());
+
+        signal.set(1);
+        assert!(!observer.is_dirty());
+
+        signal.set(2);
+        assert!(observer.is_dirty());
+    }
+}
+
+#[cfg(test)]
+mod peek_tests {
+    use super::*;
+
+    #[test]
+    fn peek_does_not_subscribe() {
+        let signal = Signal::new(1);
+        let observer = Observer::new();
+
+        track(&observer, || signal.peek());
+        signal.set(2);
+        assert!(!observer.is_dirty());
+
+        track(&observer, || signal.get());
+        signal.set(3);
+        assert!(observer.is_dirty());
     }
 }

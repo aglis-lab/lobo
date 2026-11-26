@@ -13,3 +13,7 @@ State is managed with testable signals. Signals are thread-local and
 single-threaded, preventing concurrent access and data races. When user code
 needs concurrency, Lobo abstracts task spawning through Tokio so the widget API
 itself can remain single-threaded.
+
+## License
+
+[MIT](LICENSE).

@@ -1,45 +1,64 @@
 # Retained rendering
 
-Design for drawing only what changed, in batches. Status: **proposal**, nothing here is
-finished. See [renderer.md](renderer.md) for the `Renderer` trait this builds on.
+Design for drawing only what changed, in batches, without putting any of that in `lobo`.
+Status: **proposal**. See [renderer.md](renderer.md) for the `Renderer` trait this builds on.
 
 ## Problem
 
-The declarative layer is already retained: `Node`s persist, a signal change rebuilds only the
-nodes that read it. Drawing is not. `render_frame` lays out the whole tree and paints every
-widget, straight into the backend, on every change. That is immediate mode with a retained
-tree in front of it.
+The declarative layer is already retained: `Node`s persist, and a signal change rebuilds only
+the nodes that read it. Drawing is not. `render_frame` lays out the whole tree and paints every
+widget straight into the backend on every change. That is immediate mode behind a retained tree.
 
 Goals:
 
 1. **Redraw only the changed region.** A blinking caret must not repaint the screen.
-2. **Not immediate mode.** `paint` must not be what talks to the device.
+2. **Not immediate mode.** `paint` must not talk to the device.
 3. **Batch.** One submission per frame, not one call per primitive.
-4. Keep every existing widget's `paint` unchanged.
+4. **Keep `lobo` declarative.** It only knows the `renderer` crate: no damage, batching or
+   backend code, and no knowledge that `renderer-cpu` or `renderer-gpu` exist.
+5. Existing widgets' `paint` stays unchanged.
 
-## Overview
+## Crate responsibilities
 
 ```
-signal change
-   │ marks the node's observer dirty
-   ▼
-update ──▶ layout (only if needed) ──▶ walk ──▶ damage ──▶ batch ──▶ backend
- rebuild     tree top-down              re-record   merged     filtered,     begin_frame
- dirty nodes                            changed     rects      clipped       draw_batch
-                                        nodes only                          end_frame
+lobo           declarative tree, signals, layout, focus, widgets
+  │  depends on
+  ▼
+renderer       Renderer trait, geometry, paint types, DrawCmd, Recorder, Scene
+  ▲  depend on                       ▲
+  │                                  │
+renderer-cpu  (vello_cpu)      renderer-gpu  (wgpu)
 ```
 
-Three ideas:
+| Crate | Owns | Does not know |
+|---|---|---|
+| `renderer` | everything about *what to draw and when*: display lists, layers, diffing, damage, clipped batching, the frame protocol | `lobo`, widgets, signals, any concrete backend |
+| `lobo` | *what the UI is*: build, layout, focus, the recording hook | damage, batching, pixels, backends |
+| `renderer-cpu`, `renderer-gpu` | *how to put pixels down* | `lobo`, how damage is computed |
 
-- **Record, don't draw.** `paint` writes into a *display list* (`Vec<DrawCmd>`) through a
-  `Recorder`, which implements `Renderer`. Widgets are unchanged.
-- **Cache per node.** Each node keeps the list from its last paint and re-records only when
-  something it depends on changed. Comparing the new list with the old one tells exactly
-  whether pixels changed.
-- **Compositor.** Owns the frame: finds damage, filters the cached lists to it, and submits one
-  batch.
+The application picks a backend and passes it to `lobo`'s run function through the `Renderer`
+trait. `lobo` never names a backend type.
 
-## Display list
+Backends come from crates.io (`vello_cpu`, `wgpu`). If a change to either is ever needed, use a
+fork and `[patch.crates-io]` in the workspace manifest until it is released upstream; no git
+submodule.
+
+## The scene (in `renderer`)
+
+`lobo` describes drawing as a tree of **layers**. A layer is the retained form of one widget's
+own painting:
+
+```rust
+struct LayerId(u64);               // stable for the life of a node; lobo allocates it
+
+scene.set(id, list);               // its own commands, with child / overlay slots
+scene.remove(id);                  // widget unmounted
+```
+
+The scene stores, per layer, the last `list` and the union of its commands' bounds. It never
+sees widgets.
+
+### Display list
 
 ```rust
 enum DrawCmd {
@@ -53,202 +72,213 @@ enum DrawCmd {
   PushClip(Rect),
   PopClip,
 }
+
+enum Item {
+  Cmd(DrawCmd, Rect /* bounds */),
+  Child(LayerId),                  // child's own list goes here
+  Overlay(LayerId),                // child's list goes after the whole tree
+}
+type DisplayList = Vec<Item>;
 ```
 
-These are exactly the `Renderer` primitives, derive `PartialEq`, and are cheap to clone.
-Coordinates are absolute canvas pixels, as widgets already use.
+`DrawCmd` mirrors the `Renderer` primitives, is `PartialEq`, and is cheap to clone. Coordinates
+are absolute canvas pixels, as widgets already use. Each command carries `bounds`: the canvas
+area it can change, cut by the clips active inside the same recording and grown 1 px for
+anti-aliasing (text from `measure_text`). A fully clipped command is dropped.
 
-The widget-level methods (`draw_checkbox`, `draw_switch`, ...) are defaults built from
-primitives, so on a `Recorder` they are recorded as primitives. A backend therefore never sees
-them and cannot override them in the retained path. That is the price of batching.
+A child is recorded on its own, so its bounds are not cut by a clip its parent pushed around
+the `Child` slot (a scroll view). Damage can then reach past the visible area. That only
+over-draws: the replay in `present` still applies the parent's clip.
 
-Each recorded command carries `bounds`: the canvas area it can change, cut by the clips active
-inside the same recording, and grown 1 px for anti-aliasing. Text bounds come from
-`measure_text`. A command whose bounds are empty (fully clipped) is dropped.
+A `Recorder` is a `Renderer` that builds a `DisplayList`. Text measuring and canvas size are
+forwarded to the real backend, so widgets lay out and paint as they would against it.
 
-A node's recording is a list of **items**, in paint order:
+The widget-level helpers (`draw_checkbox`, `draw_switch`, ...) are built from primitives, and
+in the retained path a backend never sees them, so overriding them does nothing. They stop
+being `Renderer` methods and become free functions in `lobo` (they are Material drawing, not
+backend work). `renderer`'s trait keeps only the primitives, `size`, `measure_text`,
+`snap_rect` and `draw_batch`.
 
+### Frame
+
+```rust
+let mut scene = Scene::new();
+let damage: Option<Rect> = scene.present(&mut backend);   // None: nothing changed, nothing sent
 ```
-Item::Cmd(cmd, bounds)
-Item::Child { node: Weak<Node>, origin, focused }     // paint_child(i)
-Item::Overlay { node: Weak<Node>, origin, focused }   // paint_child_on_top(i)
-```
 
-`paint_child` no longer paints; it records a `Child` marker. So a node's cache holds only its
-own drawing, and a parent re-recording never re-records its children. Children are `Weak` so
-unmounting still drops a node (and runs `dispose`) immediately.
+`present` does:
 
-## Node cache
+1. **Diff.** For every layer set since the last frame, compare the new list with the old
+   (`PartialEq`). Only if they differ is `old.bounds ∪ new.bounds` added to the damage. A
+   rebuild that paints the same pixels costs nothing.
+2. **Removed / unlinked layers.** `remove(id)` damages the layer's old bounds and drops it.
+   A layer the parent's new list no longer links (closed menu, hidden page) damages its old
+   bounds but **keeps its list**: its node is still mounted and won't re-record when it is
+   linked again, so re-linking damages those bounds again and draws the kept list.
+3. **Whole canvas** is damaged on the first frame and after a resize. A background colour
+   change needs no special case: the root's `Clear` has the whole canvas as bounds, so the
+   root list's diff damages everything.
+4. If there is no damage, **stop**: nothing reaches the backend.
+5. **Flatten** the layers from the root (expanding `Child`, then overlays in order), keep the
+   commands whose bounds intersect the damage, and wrap them in `PushClip(damage)` /
+   `PopClip`. `PushClip` / `PopClip` are always kept, whatever their bounds, so the clip stack
+   stays balanced; an empty pair is removed. A `Clear` becomes `FillRect(damage)`.
+6. Send them in one call: `backend.draw_batch(damage, &cmds)`.
 
-```
-cache {
-  items, bounds,        // last recording and the area its commands cover
-  rect, focused,        // inputs it was recorded with
-  style,                // inherited text style at that time
-  focus: [(id, was_focused)],
+Replaying every command that touches the damage (background, siblings below, siblings above),
+clipped to it, gives the same pixels as a full redraw inside it, so a partial frame is exact.
+
+### Damage
+
+One rect: the union of everything that changed, grown outward to whole pixels. Two distant
+changes (a clock and a caret) repaint the box around both. That over-draws, but it is one
+rect, one clip and one batch. A list of rects is a change inside `present` only, if a real
+backend shows the over-draw matters; nothing outside `renderer` would change.
+
+### Backend contract (one defaulted `Renderer` method)
+
+```rust
+fn draw_batch(&mut self, damage: Rect, cmds: &[DrawCmd]) {
+  for c in cmds { c.apply(self) }
 }
 ```
 
-Observers are split by phase, so a signal only triggers the work that read it:
+- The surface **keeps its pixels between frames**; only `damage` is redrawn.
+- `Clear` is never sent mid-frame (it ignores the clip); the background arrives as `FillRect`.
+- The background must be opaque, or it would compound over the old pixels.
+- The method returns when the frame is done, so a backend flushes / presents inside it.
+- `renderer-cpu` can present only `damage`. `renderer-gpu` overrides it to build one vertex
+  buffer (instanced SDF quads, glyph atlas) and uses the clip as a scissor.
 
-| Observer | Subscribed while | When dirty |
-|---|---|---|
-| build | `build`, `scope` | rebuild the node (as today), then relayout |
-| layout | `layout` | relayout |
-| paint | `paint` | re-record this node only |
+## What `lobo` does
 
-Today one observer covers all three, so a signal read in `paint` (the text field's controller)
-rebuilds the node. With a paint observer it only re-records.
+`lobo` keeps the layout and focus logic it has today and adds three small things.
 
-A node is **re-recorded** on the walk when any of these hold:
+### 1. Explicit repaint, no new observers
 
-- never recorded, or released (see below)
-- its widget or context was replaced (`update_with`) or it was rebuilt
-- its paint observer is dirty
-- its `rect` differs from the cached one (it moved or resized)
-- the `focused` flag passed down differs
-- the inherited text style differs
-- any cached focus id's current focus state differs from the recorded one
+A node keeps its single observer. A signal it reads (in `build`, `layout` or `paint`) still
+rebuilds it. That is slightly wasteful for a leaf that only reads a signal in `paint`, but the
+display-list diff makes the *redraw* exact, so the cost is only a rebuild. Splitting observers
+by phase can come later, if measured.
 
-After re-recording, the new items are compared with the old (`PartialEq`). Only if they differ
-is `old.bounds ∪ new.bounds` added to the damage. A rebuild that produces the same pixels
-(the common case for a composite parent) costs no repaint.
-
-### Released nodes
-
-A node that stops being painted must have its pixels cleared:
-
-- **Unmounted**: `Drop` adds its cached bounds to the damage.
-- **No longer referenced by its parent's new recording** (a closed menu, a hidden page): the
-  parent diff finds the dropped `Child` / `Overlay` links and calls `release()` on each: add the
-  node's bounds to the damage, clear its cache, recurse into its own links.
-
-## Layout
-
-Layout stays top-down and whole-tree, but is skipped when nothing could have moved:
-
-```
-relayout = first frame || canvas size changed || any node rebuilt || any layout observer dirty
-```
-
-Layout writes `size` / `offset` only. It does not paint. Nodes whose rect changed notice it in
-the walk and re-record. Partial (subtree) layout with relayout boundaries is a later
-optimisation, not part of this design.
-
-## Compositor
+Signals are state the **user** interacts with. State the **system** owns (hover, press,
+focus ring, caret blink, animation frame) is not a signal, so a widget asks for a repaint
+explicitly:
 
 ```rust
-let mut compositor = Compositor::new();
-let info = compositor.render(&root, &mut backend);   // FrameInfo { relaid_out, damage, commands }
+// in Element::attach, keep the handle in node state
+let repaint: Repaint = cx.repaint();
+// later, from an event handler or timer, on the UI thread
+repaint.mark();            // re-record this node on the next frame; no rebuild, no relayout
 ```
 
-`render` does, in order:
+`Repaint` is a small `Clone` handle to one node. `mark` sets the node's paint-dirty flag and
+wakes the run loop, the same wake-up a signal uses. A repaint that records the same list costs
+nothing. There is no `mark_needs_layout`: layout-affecting state must be a signal or part of
+the widget, so it goes through `build`.
 
-1. `root.update()`: rebuild dirty nodes.
-2. Layout, if the condition above holds.
-3. **Walk** from the root, then drain overlays (as `render_frame` does today). Each node is
-   re-recorded if needed; then its focus ids are registered with `focus` (replayed from the
-   cache for clean nodes, so Tab order stays complete) and its items are appended to the frame
-   list, expanding `Child` markers recursively. The walk is O(nodes + commands) but only
-   re-records changed nodes.
-4. **Damage**: take everything added during the walk and by `Drop`. The whole canvas is damaged
-   on the first frame, after a resize, or when the theme's surface colour changes.
-5. If the damage is empty, **stop**: nothing is sent to the backend.
-6. **Batch**: for each damage rect `D`, emit `PushClip(D)`, every command whose `bounds`
-   intersect `D` (a `Clear` becomes `FillRect(D)`), then `PopClip`. Clip commands are always
-   kept so the stack stays balanced; an empty `PushClip`/`PopClip` pair is removed.
-7. Submit:
+### 2. Recording instead of painting
+
+`Node` paints into a `Recorder` and hands the result to the scene. `paint_child(i)` records
+`Item::Child(kid_id)`; `paint_child_on_top(i)` records `Item::Overlay(kid_id)`. A node is
+re-recorded during the walk only when it must be:
+
+- never recorded, or its widget / context was replaced or it was rebuilt
+- `Repaint::mark` was called on it
+- its laid-out `rect` changed
+- the `focused` flag passed down changed
+- the inherited text style changed
+- a cached focus id's current focus state differs from when it was recorded
+
+Otherwise the walk does nothing for that node: its layer in the scene is already current.
+Cost is O(nodes) for the walk, plus recording only the changed nodes.
+
+### 3. Layout only when needed
 
 ```
-backend.begin_frame(&damage_rects);
-backend.draw_batch(&batch);       // one call per frame
-backend.end_frame();
+relayout = first frame || canvas size changed || any node rebuilt (a dirty observer rebuilds)
 ```
 
-Replaying *every* command that touches `D` (background, siblings below, siblings above), clipped
-to `D`, gives the same pixels inside `D` as a full redraw, so partial updates are exact.
+Layout only writes `size` / `offset`. Nodes whose rect changed notice it in the walk and
+re-record. Subtree layout with relayout boundaries is a later optimisation.
 
-### Damage regions
+### Focus
 
-`Damage` holds pixel-aligned rects (grown outward to whole pixels). Rects that overlap or touch
-are merged; past 8 rects they collapse to their bounding box. This bounds batch size while
-keeping two distant changes (a clock and a caret) as separate small regions.
+Focus registration happens in `paint` today, so a node that is not re-recorded would drop out
+of the Tab order. `lobo` caches the focus ids a node registered and replays them in walk order
+(same as today's paint order), so Tab order is unchanged. A focus change makes the nodes whose
+cached state differs re-record, so only the old and new focus rings repaint. Focus never enters
+the scene; it is `lobo` state.
 
-## Renderer trait changes
+### Lifecycle
 
-Added with defaults, so existing backends keep compiling:
+- A node's `LayerId` is allocated at mount. The scene belongs to the run loop, so a node
+  cannot reach it from `Drop`. Instead `Drop` pushes the id onto a removed-ids list in the
+  tree's root state (the root is passed to the walk, not a global), and the walk calls
+  `scene.remove(id)` for each before `present`. An unmounted widget's pixels are cleared on
+  the next frame and `dispose` still runs immediately.
+- Child links in a list refer to ids, not to `Rc<Node>`, so the scene never keeps a node alive.
+
+## Entry point
 
 ```rust
-fn begin_frame(&mut self, damage: &[Rect]) {}
-fn draw_batch(&mut self, cmds: &[DrawCmd]) { for c in cmds { c.apply(self) } }
-fn end_frame(&mut self) {}
+lobo::run(app, &mut backend)         // backend: &mut dyn Renderer
 ```
 
-Contract for a backend:
-
-- The surface **keeps its pixels between frames**; only damaged rects are redrawn.
-- `Clear` is never sent mid-frame (it ignores the clip). The background arrives as `FillRect`.
-- A CPU backend can use `damage` to upload or present only those rects. A GPU backend overrides
-  `draw_batch` to build one vertex buffer (rects and circles as instanced SDF quads, text from
-  a glyph atlas), using the `PushClip` rects as scissors.
-
-The background must be opaque: translucent fills are re-blended over a freshly repainted
-background, but a translucent background would compound over the old pixels.
-
-## Focus
-
-Focus registration happens in `paint` today, so a cached (not re-recorded) node would drop out
-of the Tab order. The cache therefore stores the focus ids it registered and replays them in
-walk order. The walk order matches today's paint order, so Tab order is unchanged. A change of
-focus makes the affected nodes (those whose cached `was_focused` differs, and descendants whose
-`focused` flag changed) re-record, so only the old and new focus rings repaint.
+Each loop turn: dispatch input, `root.update()`, relayout if needed, walk (re-record changed
+nodes into the scene), `scene.present(&mut backend)`. `lobo` calls `present`; everything inside
+it lives in `renderer`.
 
 ## Behaviour changes to be aware of
 
-- `render_frame` is replaced by `Compositor::render`. `PaintCx::renderer` is now a recorder;
-  `measure_text` and `size` still reach the real backend.
-- A widget that draws based on state that is neither a `Signal` read in `paint` nor part of its
-  widget/context/rect (for example a `Cell` mutated from an event handler) will not repaint.
-  Such state must be a `Signal`, or the handler must call a new `PaintCx`-free hook,
-  `mark_needs_paint` (open question below).
-- Signals read in `layout` no longer rebuild the node, they relayout it.
+- `render_frame` is removed; `PaintCx::renderer` is a recorder. `measure_text` and `size` still
+  reach the real backend.
+- A widget that draws from state that is neither a `Signal`, nor part of its widget / context /
+  rect (for example a `Cell` mutated in an event handler) will not repaint until it calls
+  `Repaint::mark`.
 - Overlay ordering and `focus::request_next` are unchanged.
 
 ## Testing
 
-With a spying backend that records `begin_frame` / `draw_batch` / `end_frame`:
+In `renderer` (no `lobo`, with a spy backend that records each `draw_batch`):
 
 - first frame damages the whole canvas, one `draw_batch` call
-- a second `render` with nothing changed sends nothing
-- a signal read only in `paint` repaints that widget's rect, and `build` does not run again
-- moving one widget in a `Column` damages the old and new rects, not the canvas
-- a rebuild producing identical output sends nothing
-- closing a menu clears the overlay's area
-- unmounting a node damages its old bounds
-- focus change repaints only the two focus rings; Tab order is unchanged
-- the pixels of a partial frame equal a full redraw (replay both into a recording and compare
-  the clipped results)
-- `Damage` unit tests: pixel snapping, merge, collapse
+- `present` with no layer changes sends nothing
+- an identical list set again sends nothing
+- a changed layer damages `old ∪ new` bounds only
+- removing a layer, or unlinking a child, damages its old bounds; re-linking it damages them again
+- overlays draw after the tree
+- a partial frame equals a full redraw inside the damaged rect. Comparing command lists can't
+  show this; it needs pixels, so it is a `renderer-cpu` test (render both into a buffer and
+  compare inside the damage)
+- damage is grown to whole pixels
+
+In `lobo` (with a null / spying backend):
+
+- `Repaint::mark` re-records that node only: `build` and `layout` do not run again
+- a rebuild that paints the same pixels sends nothing
+- moving one widget in a `Column` damages its old and new rects, not the canvas
+- closing a menu clears the overlay area
+- Tab order and focus rings survive caching
 
 ## Implementation steps
 
-1. `DrawCmd`, `Recorder`, `Damage`, `Rect::{union, touches, intersects}`, and the three
-   `Renderer` hooks. (No behaviour change.)
-2. Split `Node` observers into build / layout / paint; add the cache, `walk`, `release`, and
-   damage on `Drop`.
-3. `PaintCx` records `Child` / `Overlay` items and focus ids; remove `render_frame` and the
-   overlay thread-local.
-4. `Compositor` and `FrameInfo`.
-5. Tests above; update `reconcile.rs` to use the compositor with a null backend.
-6. Move the pieces that do not depend on `lobo` into the `renderer` crate (see
-   [renderer.md](renderer.md)).
+1. `renderer`: move geometry, paint types and the `Renderer` trait out of `lobo`; add `DrawCmd`,
+   `Recorder`, `Scene` and `draw_batch`, with their tests. The widget-level `draw_*` helpers
+   become free functions in `lobo` instead of moving. `lobo` re-exports. Do this in
+   slices (types, then recorder, then scene), each tested, before touching `lobo`.
+2. `lobo`: record into the scene; `Repaint` handle; focus cache; relayout condition; remove
+   `render_frame`.
+3. `lobo`: `run(app, backend)`.
+4. `renderer-cpu` (`vello_cpu`), then `renderer-gpu` (`wgpu`), each with a gallery example and
+   the render tests that were removed with the terminal backend.
 
 ## Open questions
 
-- **Repaint without a signal.** Do we want an explicit `mark_needs_paint()` for state that is
-  not a `Signal`, or require signals? Signals are the existing convention.
-- **Relayout boundaries.** Full-tree layout when anything changes is simple and fine for now;
-  is subtree layout needed for large lists?
-- **Animation.** A frame clock should mark animating nodes' paint observer dirty each tick; not
-  designed here.
-- **Max damage rects.** 8 is a guess; tune on a real backend.
+- **Input source.** `run` reads keys from the terminal today (`src/term.rs`, crossterm). With a
+  windowed backend the window owns the event loop and the events. Who drives the loop, and how
+  input reaches `lobo` without `lobo` naming the backend, is not designed here.
+- **Relayout boundaries.** Is full-tree layout acceptable for large lists?
+- **Animation.** A frame clock calls `Repaint::mark` on animating nodes each tick; not designed here.
+- **`Padding` in geometry.** `Rect::deflate` takes `lobo::Padding`; it must move to `renderer`
+  (or `deflate` takes four floats) when the geometry types move.

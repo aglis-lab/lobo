@@ -42,7 +42,9 @@ widget tree ──layout──▶ rects ──paint──▶ &mut dyn Renderer �
 `draw_slider`, `draw_linear_progress`, `draw_circular_progress`, `draw_focus`, `draw_caret`.
 
 They are built from the primitives, so a pixel backend gets correct Material widgets for free.
-A backend can override them where the default looks wrong on its device.
+A backend can override them where the default looks wrong on its device. The
+[retained rendering proposal](retained-rendering.md) turns them into free functions in `lobo`,
+because a backend never sees them once drawing is batched.
 
 ### Writing a backend
 

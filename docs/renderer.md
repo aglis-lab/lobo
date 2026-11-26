@@ -2,22 +2,23 @@
 
 How Lobo draws, and how the drawing code is split into crates.
 
-The terminal backend has been removed; there is currently no backend that can draw.
-Today everything lives in `src/render/` inside the `lobo` crate. The empty `renderer/` crate is
-the start of the split described in [Crate layout](#crate-layout-proposed).
+The `renderer` crate holds the `Renderer` trait, geometry, paint types, display lists, `Recorder`,
+and `Scene`. `renderer-cpu` implements a software `PixmapRenderer` backed by `vello_cpu`.
+`renderer-gpu` is still an empty placeholder.
 
 ## Model
 
-Widgets never touch a device. They draw through the `Renderer` trait (`src/render/mod.rs`):
+Widgets never touch a device. They draw through the `Renderer` trait (`renderer/src/lib.rs`,
+re-exported by `lobo` via `src/render/mod.rs`):
 
 ```
-widget tree ──layout──▶ rects ──paint──▶ &mut dyn Renderer ──▶ backend (pixels, GPU)
+widget tree ──layout──▶ rects ──paint──▶ Recorder ──▶ Scene ──draw_batch──▶ backend (pixels, GPU)
 ```
 
 - **Units**: logical pixels, origin top-left. 1 px = 1 Material dp. The default canvas is
   `HD_720` (1280x720).
-- **Geometry**: `Offset`, `Size`, `Rect` (`translate`, `deflate`, `inflate`, `intersect`,
-  `center_rect`, ...).
+- **Geometry**: `Offset`, `Size`, `Rect` (`translate`, `deflate(left, top, right, bottom)`,
+  `inflate`, `intersect`, `intersects`, `union`, `round_out`, `center_rect`, ...).
 - **Paint**: `Color` (sRGB, straight alpha, `over()` for source-over), `TextPaint`, `Border`,
   `BoxPaint` (fill + border + radius + elevation), `ToggleColors`, `TrackColors`, `IconData`.
 
@@ -34,26 +35,24 @@ widget tree ──layout──▶ rects ──paint──▶ &mut dyn Renderer �
 | `push_clip`, `pop_clip` | nested clip rects (intersected) |
 
 `snap_rect` is optional: it returns the rect a backend will actually cover on its device grid
-(identity for pixel backends).
+(identity for pixel backends). `draw_batch` is optional: it draws a clipped damaged frame batch
+and defaults to replaying each `DrawCmd` through the primitives.
 
-### Widget-level methods (defaulted)
+### Widget-level helpers (`src/render/mod.rs`)
 
 `draw_shadow`, `draw_box`, `draw_icon`, `draw_checkbox`, `draw_radio`, `draw_switch`,
 `draw_slider`, `draw_linear_progress`, `draw_circular_progress`, `draw_focus`, `draw_caret`.
 
-They are built from the primitives, so a pixel backend gets correct Material widgets for free.
-A backend can override them where the default looks wrong on its device. The
-[retained rendering proposal](retained-rendering.md) turns them into free functions in `lobo`,
-because a backend never sees them once drawing is batched.
+They are free functions in `lobo::render` built from the `Renderer` primitives, because a backend
+never sees them once drawing is batched through `Recorder` and `Scene`.
 
 ### Writing a backend
 
 1. Implement the primitives.
 2. Make `measure_text` agree with `draw_text`, or layout and painting will disagree.
-3. Honour the clip stack in every draw call.
-4. Override a widget-level method only where the default looks wrong on your device.
+3. Honour the clip stack in every draw call (and `draw_batch` if overridden).
 
-## Crate layout (proposed)
+## Crate layout
 
 Three crates, in one workspace, each depending only on the one above:
 
@@ -65,10 +64,10 @@ renderer          the trait, geometry, paint types.        no heavy deps
 
 | Crate | Contents | Dependencies |
 |---|---|---|
-| `renderer` | `Renderer`, `Offset/Size/Rect`, `Color`, `TextPaint`, `BoxPaint`, ... | none |
-| `renderer-cpu` | `pixmap` (RGBA buffer via [`vello_cpu`](https://github.com/linebender/vello)) | `renderer`, optional `vello_cpu` |
-| `renderer-gpu` | `wgpu` backend drawing into a surface or texture | `renderer`, `wgpu` |
-| `lobo` | widgets, layout, state; re-exports `renderer` | `renderer` only |
+| `renderer` | `Renderer`, `Offset/Size/Rect`, `Color`, `TextPaint`, `BoxPaint`, `DrawCmd`, `Recorder`, `Scene` | none |
+| `renderer-cpu` | `PixmapRenderer` (RGBA buffer via `vello_cpu` + built-in 5×7 glyph renderer); interactive `winit` + `softbuffer` gallery example (`--png` for headless export) | `renderer`, `vello_cpu` |
+| `renderer-gpu` | `wgpu` backend drawing into a surface or texture (placeholder, not yet implemented) | `renderer` |
+| `lobo` | widgets, layout, state, retained tree; re-exports `renderer` | `renderer` only |
 
 Why this split:
 
@@ -111,16 +110,17 @@ wanted later.
 Both pixel backends use the default widget-level methods unchanged. Colour is straight-alpha
 sRGB at the trait boundary; convert to premultiplied inside the backend if it needs to.
 
-## Migration steps
+## Migration status
 
-1. Move geometry, paint types and the `Renderer` trait from `src/render/mod.rs` into `renderer`.
-   `lobo` re-exports them (`pub use renderer::*`) so existing imports keep working.
-   Note `Border` derives `Widget` and `Rect::deflate` takes `lobo::Padding`: both must move
-   out of the trait's path (own a `Padding` in `renderer`, or make `deflate` take four floats).
-2. Point `lobo` at `renderer`.
-3. Add `renderer-cpu` (`pixmap`), then `renderer-gpu`, each with a gallery-style example.
-   The gallery example and the render tests were deleted with the terminal backend; bring
-   them back on the first pixel backend.
+1. **Done**: Moved geometry, paint types, and `Renderer` into `renderer`, with `lobo` re-exporting
+   them (`pub use renderer::*`). `Border` no longer derives `Widget`, and `Rect::deflate` takes
+   four floats (`left, top, right, bottom`).
+2. **Done**: `lobo` points at `renderer` and runs retained rendering via `Node::present`.
+3. **Done (CPU)**: Added `renderer-cpu` (`PixmapRenderer` with HiDPI scale support),
+   `renderer-cpu/examples/gallery.rs` (interactive `winit` + `softbuffer` GUI window, or
+   `--png [path]` for headless PNG output), and render/retained tests
+   (`renderer-cpu/tests/{render,retained}.rs`).
+4. **Next**: Implement `renderer-gpu` (`wgpu`) and a gallery example for it.
 
 ## Known gaps
 

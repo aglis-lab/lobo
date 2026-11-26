@@ -5,3 +5,10 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+renderer = { path = "../renderer" }
+vello_cpu = { version = "0.4", features = ["png"] }
+
+[dev-dependencies]
+lobo = { path = ".." }
+winit = "0.30"
+softbuffer = "0.4"

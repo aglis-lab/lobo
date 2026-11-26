@@ -11,12 +11,13 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::Padding;
-use crate::render::{Offset, Rect, Renderer, Size, TextPaint};
+use crate::render::{Offset, Recorder, Rect, Renderer, Scene, Size, TextPaint};
 use crate::theme::{TextStyle, ThemeData};
-use crate::tree::Node;
+use crate::tree::{Node, WalkEvent};
 
 // ---------------------------------------------------------------------------
 // Constraints
@@ -247,9 +248,9 @@ impl LayoutCx<'_> {
 // Paint
 // ---------------------------------------------------------------------------
 
-/// What a widget's `paint` gets: the renderer, where it was laid out, and its children.
+/// What a widget's `paint` gets: the recorder, where it was laid out, and its children.
 pub struct PaintCx<'a> {
-  pub renderer: &'a mut dyn Renderer,
+  pub renderer: Recorder<'a>,
   pub(crate) rect: Rect,
   pub(crate) kids: &'a [Rc<Node>],
   pub(crate) theme: &'a ThemeData,
@@ -257,6 +258,10 @@ pub struct PaintCx<'a> {
   /// Inside the focused `InputEvent` (or it is this widget).
   pub(crate) focused: bool,
   pub(crate) state: &'a RefCell<Option<Rc<dyn Any>>>,
+  pub(crate) backend: &'a dyn Renderer,
+  pub(crate) scene: &'a mut Scene,
+  pub(crate) overlays: &'a mut VecDeque<(Rc<Node>, Offset, bool)>,
+  pub(crate) events: &'a mut Vec<WalkEvent>,
 }
 
 impl PaintCx<'_> {
@@ -278,13 +283,22 @@ impl PaintCx<'_> {
 
   /// Paints child `i` now.
   pub fn paint_child(&mut self, i: usize) {
-    let origin = self.rect.origin();
-    self.kids[i].paint(origin, &mut *self.renderer, self.focused);
+    self.renderer.child(self.kids[i].layer_id);
+    self.events.push(WalkEvent::Child(i));
+    self.kids[i].walk_paint(
+      self.rect.origin(),
+      self.focused,
+      self.scene,
+      self.backend,
+      self.overlays,
+    );
   }
 
   /// Paints child `i` after the whole tree, above everything (menus, popups).
   pub fn paint_child_on_top(&mut self, i: usize) {
-    defer_overlay(self.kids[i].clone(), self.rect.origin(), self.focused);
+    self.renderer.overlay(self.kids[i].layer_id);
+    self.events.push(WalkEvent::Overlay(i));
+    self.overlays.push_back((self.kids[i].clone(), self.rect.origin(), self.focused));
   }
 
   /// This widget's bounds on the canvas.
@@ -319,40 +333,10 @@ impl PaintCx<'_> {
   /// returns whether it has the focus. Its subtree then sees `is_focused`.
   pub(crate) fn register_focus(&mut self, id: &str) -> bool {
     let focused = focus::register(id, self.rect);
+    self.events.push(WalkEvent::Focus { id: id.to_string(), was_focused: focused });
     self.focused |= focused;
     focused
   }
-}
-
-// ---------------------------------------------------------------------------
-// Frame
-// ---------------------------------------------------------------------------
-
-thread_local! {
-  static OVERLAYS: RefCell<Vec<(Rc<Node>, Offset, bool)>> = const { RefCell::new(Vec::new()) };
-}
-
-fn defer_overlay(node: Rc<Node>, parent_origin: Offset, focused: bool) {
-  OVERLAYS.with(|o| o.borrow_mut().push((node, parent_origin, focused)));
-}
-
-/// Lays out and paints `root` onto the whole canvas.
-pub fn render_frame(root: &Node, renderer: &mut dyn Renderer) {
-  let size = renderer.size();
-  root.layout(Constraints::tight(size), renderer, &TextStyle::default());
-  renderer.clear(ThemeData::of(&root.context()).color_scheme.surface);
-  focus::begin_frame();
-  root.paint(Offset::ZERO, renderer, false);
-  // Overlays may add overlays of their own (a submenu); drain until none are left.
-  loop {
-    let next = OVERLAYS.with(|o| {
-      let mut o = o.borrow_mut();
-      if o.is_empty() { None } else { Some(o.remove(0)) }
-    });
-    let Some((node, origin, focused)) = next else { break };
-    node.paint(origin, renderer, focused);
-  }
-  focus::end_frame();
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +372,10 @@ pub mod focus {
       s.entries.clear();
       s.pending = false;
     });
+  }
+
+  pub(crate) fn is_pending() -> bool {
+    STATE.with(|s| s.borrow().pending)
   }
 
   pub(crate) fn end_frame() {

@@ -3,7 +3,10 @@
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::actions::{ButtonBox, ButtonLook, label};
 use crate::material::common::Callback;
-use crate::render::{BoxPaint, Color, Offset, Rect, Size, TextPaint, TrackColors};
+use crate::render::{
+  BoxPaint, Color, Offset, Rect, Renderer, Size, TextPaint, TrackColors, draw_box,
+  draw_circular_progress, draw_linear_progress,
+};
 use crate::theme::ThemeData;
 use crate::{Element, MainAxisSize, Padding, Row, Spacer, Widget, ui};
 
@@ -76,7 +79,7 @@ impl Element for LinearProgressIndicator {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = track_colors(cx.theme());
     let rect = cx.rect();
-    cx.renderer.draw_linear_progress(rect, self.value, &colors);
+    draw_linear_progress(&mut cx.renderer, rect, self.value, &colors);
   }
 }
 
@@ -96,7 +99,7 @@ impl Element for CircularProgressIndicator {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = track_colors(cx.theme());
     let rect = cx.rect();
-    cx.renderer.draw_circular_progress(rect, self.value, &colors);
+    draw_circular_progress(&mut cx.renderer, rect, self.value, &colors);
   }
 }
 
@@ -167,7 +170,8 @@ impl Element for SnackBar {
   fn paint(&self, cx: &mut PaintCx) {
     let scheme = cx.theme().color_scheme;
     let rect = cx.rect();
-    cx.renderer.draw_box(
+    draw_box(
+      &mut cx.renderer,
       rect,
       &BoxPaint { color: scheme.inverse_surface, border: None, radius: 4.0, elevation: 3.0 },
     );

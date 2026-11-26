@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use lobo::*;
 
-/// Draws nothing; `render_frame` with it still lays out and registers focus.
+/// Draws nothing; `present` with it still lays out and registers focus.
 struct Null;
 
 impl Renderer for Null {
@@ -215,7 +215,8 @@ fn focus_and_listener_order_survive_a_parent_rebuild() {
     Context::default(),
   );
   let mut r = Null;
-  render_frame(&node, &mut r);
+  let mut scene = Scene::new();
+  node.present(&mut scene, &mut r);
   let listeners = global_events.count();
   focus::set(Some(1));
   let focused = global_events.current_focus();
@@ -225,7 +226,7 @@ fn focus_and_listener_order_survive_a_parent_rebuild() {
   // Same listeners, same focus id: nothing was re-registered.
   assert_eq!(global_events.count(), listeners);
   assert_eq!(global_events.current_focus(), focused);
-  render_frame(&node, &mut r);
+  node.present(&mut scene, &mut r);
   assert_eq!(focus::current(), Some(1));
 
   // The kept listener calls the new widget's callback (it sees `round` = 1).

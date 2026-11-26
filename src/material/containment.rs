@@ -2,7 +2,7 @@
 
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::common::{Callback, disabled_fg, focus_on_open, pressable, styled};
-use crate::render::{Border, BoxPaint, Color, Offset, Rect, Size};
+use crate::render::{Border, BoxPaint, Color, Offset, Rect, Renderer, Size, draw_box, draw_focus};
 use crate::theme::ThemeData;
 use crate::{
   Center, Column, CrossAxisAlignment, Element, Icon, MainAxisAlignment, MainAxisSize, Padding, Row,
@@ -90,7 +90,8 @@ impl Element for AlertDialog {
     let width = (rect.width - 96.0).clamp(280.0, 560.0);
     let panel =
       Rect::new(rect.center().x - width / 2.0, child.y - 24.0, width, child.height + 48.0);
-    cx.renderer.draw_box(
+    draw_box(
+      &mut cx.renderer,
       panel,
       &BoxPaint {
         color: scheme.surface_container_high,
@@ -149,7 +150,8 @@ impl Element for BottomSheet {
   fn paint(&self, cx: &mut PaintCx) {
     let scheme = cx.theme().color_scheme;
     let rect = cx.rect();
-    cx.renderer.draw_box(
+    draw_box(
+      &mut cx.renderer,
       rect,
       &BoxPaint { color: scheme.surface_container_low, border: None, radius: 28.0, elevation: 1.0 },
     );
@@ -204,7 +206,8 @@ impl Element for Card {
 
   fn paint(&self, cx: &mut PaintCx) {
     let s = cx.theme().color_scheme;
-    let rect = cx.rect().deflate(self.margin());
+    let m = self.margin();
+    let rect = cx.rect().deflate(m.left, m.top, m.right, m.bottom);
     let paint = match self.variant {
       CardVariant::Elevated => {
         BoxPaint { color: s.surface_container_low, border: None, radius: 12.0, elevation: 1.0 }
@@ -220,7 +223,7 @@ impl Element for Card {
       },
     };
     let paint = BoxPaint { color: self.color.unwrap_or(paint.color), ..paint };
-    cx.renderer.draw_box(rect, &paint);
+    draw_box(&mut cx.renderer, rect, &paint);
     cx.paint_children();
   }
 }
@@ -448,7 +451,7 @@ impl Element for ListTileBody {
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      cx.renderer.draw_focus(rect.inflate(-2.0), color, 0.0);
+      draw_focus(&mut cx.renderer, rect.inflate(-2.0), color, 0.0);
     }
   }
 }

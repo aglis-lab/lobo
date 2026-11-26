@@ -20,12 +20,12 @@ and `review` when asked to review a diff, doc or plan.
 
 ## Status (check it, it moves)
 
-- There is **no rendering backend right now**. The terminal renderer was deleted. `run` prints
-  the widget tree as text. `renderer-cpu` and `renderer-gpu` are empty crates.
-- The `Renderer` trait and geometry still live in `src/render/mod.rs` (they move to the
-  `renderer` crate later).
-- Retained rendering (display lists, damage, one batch per frame) is a **proposal**:
-  `docs/retained-rendering.md`. Do not implement it unprompted; do not describe it as built.
+- `renderer` holds the `Renderer` trait, geometry, paint types, `DrawCmd`, `Recorder`, and `Scene`.
+- Retained rendering (display lists, damage, one batch per frame via `Node::present`) is
+  implemented in `renderer` and `lobo`; `lobo::run(app, backend)` takes `&mut dyn Renderer`.
+- `renderer-cpu` implements `PixmapRenderer` backed by `vello_cpu` (with HiDPI scaling, a
+  built-in 5×7 glyph renderer, and an interactive `winit` + `softbuffer` `gallery` example;
+  pass `--png` for headless export). `renderer-gpu` is still an empty placeholder.
 - Confirm with `git log`, `git status` and the docs before assuming any of the above.
 
 ## Map
@@ -35,16 +35,18 @@ and `review` when asked to review a diff, doc or plan.
 | `src/widget.rs` | `Widget`, the `Element` trait, `Text`/`Container`/`Column`, `Padding` (data), `InputEvent`, `global_events` |
 | `src/basic.rs` | layout widgets (Flutter's `widgets` library): rows, stacks, alignment, flex, icons, lists |
 | `src/theme.rs` | Material 3 theme: colour scheme, type scale, inherited text style |
-| `src/tree.rs` | `Node`: retained tree, rebuild on dirty signal, reconcile children in place |
+| `src/tree.rs` | `Node`: retained tree, rebuild on dirty signal, reconcile children in place, `Repaint`, `present` |
 | `src/signal.rs` | `Signal`, `Observer`, `track`; thread-local, single-threaded |
-| `src/layout.rs` | `Constraints`, `LayoutCx`, `PaintCx`, `focus` (Tab order) |
-| `src/render/mod.rs` | `Renderer` trait, `Rect`/`Size`/`Color`, paint types |
-| `src/context.rs` | `Context`, `run` loop, key dispatch |
+| `src/layout.rs` | `Constraints`, `LayoutCx`, `PaintCx` (with `Recorder`), `focus` (Tab order) |
+| `src/render/mod.rs` | re-exports `renderer::*` and defines widget-level `draw_*` free functions |
+| `src/context.rs` | `Context`, `run(app, backend)` loop, key dispatch |
 | `src/task.rs`, `src/provider.rs` | async tasks on the UI thread (Tokio), `Provider` |
 | `src/term.rs` | raw terminal input (crossterm), not drawing |
 | `src/material/` | Material widgets by group (actions, selection, navigation, ...) |
 | `lobo-macros/` | `ui!`, `#[derive(Widget)]`, `#[derive(Model)]` |
-| `renderer*/` | backend crates, currently empty |
+| `renderer/` | `Renderer` trait, geometry, paint types, `DrawCmd`, `Recorder`, `Scene` |
+| `renderer-cpu/` | `PixmapRenderer` software RGBA backend via `vello_cpu`, plus interactive `gallery` GUI example |
+| `renderer-gpu/` | GPU backend crate, currently empty |
 | `docs/` | `renderer.md`, `retained-rendering.md`, `material-widgets.md`, `tickets.md` |
 
 ## How it works, in five lines

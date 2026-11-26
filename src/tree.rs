@@ -1,6 +1,6 @@
 //! Retained tree: one `Node` per mounted widget. A node caches what its
 //! widget built, and rebuilds only when a signal it read has changed.
-//! Each frame it is laid out and painted (see `layout.rs`).
+//! Each frame, changed subtrees are laid out and re-recorded into a [`Scene`].
 //!
 //! When a node rebuilds, its new child widgets are matched against its current
 //! child nodes (by key, else by position and type). A matched node is updated in
@@ -10,16 +10,65 @@
 
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
 use std::rc::Rc;
 
-use crate::layout::{Constraints, LayoutCx, PaintCx, node_state};
-use crate::render::{Offset, Rect, Renderer, Size};
-use crate::signal::{Observer, track};
+use crate::layout::{Constraints, LayoutCx, PaintCx, focus, node_state};
+use crate::render::{LayerId, Offset, Recorder, Rect, Renderer, Scene, Size};
+use crate::signal::{Observer, track, wake};
 use crate::task::with_owner;
 use crate::theme::{TextStyle, ThemeData};
-use crate::{Context, Widget};
+use crate::{Context, Widget, global_events};
+
+const BACKDROP_LAYER: LayerId = LayerId(0);
+
+pub(crate) struct TreeState {
+  next_layer: u64,
+  pub(crate) removed_layers: Vec<LayerId>,
+  pub(crate) layout_dirty: bool,
+  pub(crate) last_size: Option<Size>,
+}
+
+impl TreeState {
+  fn new() -> Self {
+    TreeState { next_layer: 1, removed_layers: Vec::new(), layout_dirty: true, last_size: None }
+  }
+
+  fn alloc_layer(&mut self) -> LayerId {
+    let id = LayerId(self.next_layer);
+    self.next_layer += 1;
+    id
+  }
+}
+
+/// Handle for requesting a repaint of a node without rebuilding or laying out.
+#[derive(Clone)]
+pub struct Repaint {
+  dirty: Rc<Cell<bool>>,
+}
+
+impl Repaint {
+  /// Marks this node's display list dirty and wakes the run loop.
+  pub fn mark(&self) {
+    self.dirty.set(true);
+    wake();
+  }
+}
+
+#[derive(Clone)]
+pub(crate) enum WalkEvent {
+  Focus { id: String, was_focused: bool },
+  Child(usize),
+  Overlay(usize),
+}
+
+struct Recorded {
+  rect: Rect,
+  focused: bool,
+  style: TextStyle,
+  events: Vec<WalkEvent>,
+}
 
 pub struct Node {
   widget: RefCell<Widget>,
@@ -38,12 +87,17 @@ pub struct Node {
   /// Widget state kept for the node's whole life: across frames, rebuilds and
   /// in-place updates (`LayoutCx::state`, `NodeCx::state`), e.g. a list's scroll offset.
   state: RefCell<Option<Rc<dyn Any>>>,
+  pub(crate) layer_id: LayerId,
+  tree: Rc<RefCell<TreeState>>,
+  paint_dirty: Rc<Cell<bool>>,
+  recorded: RefCell<Option<Recorded>>,
 }
 
-/// What `Element::attach`, `dispose` and `scope` get: the node's context and state.
+/// What `Element::attach`, `dispose` and `scope` get: the node's context, state, and repaint handle.
 pub struct NodeCx<'a> {
   context: &'a Context,
   state: &'a RefCell<Option<Rc<dyn Any>>>,
+  repaint: &'a Rc<Cell<bool>>,
 }
 
 impl NodeCx<'_> {
@@ -57,10 +111,21 @@ impl NodeCx<'_> {
   pub fn state<T: Default + 'static>(&self) -> Rc<RefCell<T>> {
     node_state(self.state)
   }
+
+  /// Returns a handle that schedules a repaint of this node on `mark()`.
+  pub fn repaint(&self) -> Repaint {
+    Repaint { dirty: self.repaint.clone() }
+  }
 }
 
 impl Node {
   pub fn mount(widget: Widget, context: Context) -> Rc<Node> {
+    let tree = Rc::new(RefCell::new(TreeState::new()));
+    Node::mount_with(widget, context, tree)
+  }
+
+  fn mount_with(widget: Widget, context: Context, tree: Rc<RefCell<TreeState>>) -> Rc<Node> {
+    let layer_id = tree.borrow_mut().alloc_layer();
     let node = Rc::new(Node {
       widget: RefCell::new(widget),
       context: RefCell::new(context),
@@ -71,6 +136,10 @@ impl Node {
       offset: Cell::new(Offset::ZERO),
       style: RefCell::new(TextStyle::default()),
       state: RefCell::new(None),
+      layer_id,
+      tree,
+      paint_dirty: Rc::new(Cell::new(true)),
+      recorded: RefCell::new(None),
     });
     node.attach();
     node.rebuild();
@@ -90,7 +159,11 @@ impl Node {
   fn attach(&self) {
     let (widget, context) = (self.widget(), self.context());
     with_owner(context.task_owner(), || {
-      widget.element.attach(&NodeCx { context: &context, state: &self.state })
+      widget.element.attach(&NodeCx {
+        context: &context,
+        state: &self.state,
+        repaint: &self.paint_dirty,
+      })
     });
   }
 
@@ -111,6 +184,9 @@ impl Node {
   }
 
   fn rebuild(&self) {
+    self.paint_dirty.set(true);
+    self.tree.borrow_mut().layout_dirty = true;
+
     let observer = Observer::new();
     *self.observer.borrow_mut() = observer.clone();
 
@@ -119,7 +195,11 @@ impl Node {
     let (built, scope, children) = with_owner(context.task_owner(), || {
       let (built, scope) = track(&observer, || {
         let built = widget.element.build(&context);
-        let scope = widget.element.scope(&NodeCx { context: &context, state: &self.state });
+        let scope = widget.element.scope(&NodeCx {
+          context: &context,
+          state: &self.state,
+          repaint: &self.paint_dirty,
+        });
         (built, scope)
       });
       let children = if built.is_none() { widget.element.children() } else { Vec::new() };
@@ -173,14 +253,14 @@ impl Node {
           kid.update_with(w, context.clone());
           kid
         }
-        None => Node::mount(w, context.clone()),
+        None => Node::mount_with(w, context.clone(), self.tree.clone()),
       })
       .collect();
     *self.kids.borrow_mut() = kids;
   }
 
   /// Rebuilds the nodes whose signals changed; clean nodes are only walked.
-  /// Returns whether anything was rebuilt (i.e. whether to repaint).
+  /// Returns whether anything was rebuilt.
   pub fn update(&self) -> bool {
     let mut rebuilt = false;
     if self.observer.borrow().is_dirty() {
@@ -233,28 +313,119 @@ impl Node {
     size
   }
 
-  /// Paints this node; the widget paints its children through `PaintCx`.
-  /// `parent_origin` is the parent's top-left on the canvas; `focused` is whether an
-  /// ancestor `InputEvent` has the keyboard focus.
-  pub(crate) fn paint(&self, parent_origin: Offset, renderer: &mut dyn Renderer, focused: bool) {
+  /// Lays out if needed, re-records changed nodes into `scene`, and submits the damaged batch.
+  /// Returns the damaged rect, or `None` when nothing changed.
+  pub fn present(&self, scene: &mut Scene, backend: &mut dyn Renderer) -> Option<Rect> {
+    let removed = std::mem::take(&mut self.tree.borrow_mut().removed_layers);
+    for id in removed {
+      scene.remove(id);
+    }
+
+    let size = backend.size();
+    let relayout = {
+      let mut tree = self.tree.borrow_mut();
+      let need = tree.layout_dirty || tree.last_size != Some(size);
+      tree.layout_dirty = false;
+      tree.last_size = Some(size);
+      need
+    };
+    if relayout {
+      self.layout(Constraints::tight(size), backend, &TextStyle::default());
+    }
+
+    let mut backdrop = Recorder::new(backend);
+    backdrop.clear(ThemeData::of(&self.context.borrow()).color_scheme.surface);
+    backdrop.child(self.layer_id);
+    scene.set_root(BACKDROP_LAYER);
+    scene.set(BACKDROP_LAYER, backdrop.finish());
+
+    focus::begin_frame();
+    let mut overlays = VecDeque::new();
+    self.walk_paint(Offset::ZERO, false, scene, backend, &mut overlays);
+    while let Some((node, origin, focused)) = overlays.pop_front() {
+      node.walk_paint(origin, focused, scene, backend, &mut overlays);
+    }
+    focus::end_frame();
+
+    scene.present(backend)
+  }
+
+  /// Walks this node for retained painting, re-recording its layer only when invalidated.
+  pub(crate) fn walk_paint(
+    &self,
+    parent_origin: Offset,
+    focused: bool,
+    scene: &mut Scene,
+    backend: &dyn Renderer,
+    overlays: &mut VecDeque<(Rc<Node>, Offset, bool)>,
+  ) {
     let rect = self.rect_in(parent_origin);
-    let widget = self.widget();
-    let theme = ThemeData::of(&self.context.borrow());
     let style = self.style.borrow().clone();
     let kids = self.kids.borrow().clone();
+
+    let cached_events = if !self.paint_dirty.get() {
+      self.recorded.borrow().as_ref().and_then(|rec| {
+        if rec.rect != rect || rec.focused != focused || rec.style != style {
+          return None;
+        }
+        let mut pending = focus::is_pending();
+        for event in &rec.events {
+          if let WalkEvent::Focus { id, was_focused } = event {
+            let now = pending || global_events.is_focused(id);
+            pending = false;
+            if now != *was_focused {
+              return None;
+            }
+          }
+        }
+        Some(rec.events.clone())
+      })
+    } else {
+      None
+    };
+
+    if let Some(events) = cached_events {
+      let mut cur_focused = focused;
+      for event in events {
+        match event {
+          WalkEvent::Focus { id, .. } => {
+            cur_focused |= focus::register(&id, rect);
+          }
+          WalkEvent::Child(i) => {
+            kids[i].walk_paint(rect.origin(), cur_focused, scene, backend, overlays);
+          }
+          WalkEvent::Overlay(i) => {
+            overlays.push_back((kids[i].clone(), rect.origin(), cur_focused));
+          }
+        }
+      }
+      return;
+    }
+
+    self.paint_dirty.set(false);
+    let widget = self.widget();
+    let theme = ThemeData::of(&self.context.borrow());
     let observer = self.observer.borrow().clone();
-    track(&observer, || {
+    let mut events = Vec::new();
+    let list = track(&observer, || {
       let mut cx = PaintCx {
-        renderer,
+        renderer: Recorder::new(backend),
         rect,
         kids: &kids,
         theme: &theme,
         style: &style,
         focused,
         state: &self.state,
+        backend,
+        scene,
+        overlays,
+        events: &mut events,
       };
       widget.element.paint(&mut cx);
+      cx.renderer.finish()
     });
+    scene.set(self.layer_id, list);
+    *self.recorded.borrow_mut() = Some(Recorded { rect, focused, style, events });
   }
 
   /// Prints the widget tree (one line per node); never calls `build`.
@@ -270,8 +441,13 @@ impl Node {
 
 impl Drop for Node {
   fn drop(&mut self) {
+    self.tree.borrow_mut().removed_layers.push(self.layer_id);
     let widget = self.widget.get_mut().clone();
     let context = self.context.get_mut().clone();
-    widget.element.dispose(&NodeCx { context: &context, state: &self.state });
+    widget.element.dispose(&NodeCx {
+      context: &context,
+      state: &self.state,
+      repaint: &self.paint_dirty,
+    });
   }
 }

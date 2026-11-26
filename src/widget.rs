@@ -5,7 +5,7 @@
 // `Widget` is both the struct and the derive macro; this imports both.
 use crate::basic::{CrossAxisAlignment, MainAxisAlignment, MainAxisSize, flex_layout};
 use crate::layout::{Constraints, LayoutCx, PaintCx};
-use crate::render::{Border, BoxPaint, Color, Offset, Size, TextPaint};
+use crate::render::{Border, BoxPaint, Color, Offset, Renderer, Size, TextPaint, draw_box};
 use crate::task::{TaskGroup, with_owner};
 use crate::theme::TextStyle;
 use crate::{Alignment, Axis, Context, Element, NodeCx, Widget};
@@ -65,10 +65,7 @@ impl Element for Text {
     let rect = cx.rect();
     let line_height = cx.renderer.measure_text("", &paint).height;
     // Re-wrapping at the laid-out width gives the same lines as layout did.
-    let lines = {
-      let r = &*cx.renderer;
-      self.lines(rect.width + 0.5, &paint, &|s, p| r.measure_text(s, p))
-    };
+    let lines = self.lines(rect.width + 0.5, &paint, &|s, p| cx.renderer.measure_text(s, p));
     for (i, line) in lines.iter().enumerate() {
       cx.renderer.draw_text(Offset::new(rect.x, rect.y + i as f32 * line_height), line, &paint);
     }
@@ -232,14 +229,15 @@ impl Element for Container {
   }
 
   fn paint(&self, cx: &mut PaintCx) {
-    let rect = cx.rect().deflate(self.margin);
+    let m = self.margin;
+    let rect = cx.rect().deflate(m.left, m.top, m.right, m.bottom);
     let paint = BoxPaint {
       color: self.color.unwrap_or(Color::TRANSPARENT),
       border: self.border,
       radius: self.radius,
       elevation: 0.0,
     };
-    cx.renderer.draw_box(rect, &paint);
+    draw_box(&mut cx.renderer, rect, &paint);
     cx.paint_children();
   }
 }

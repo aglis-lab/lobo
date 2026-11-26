@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::common::{Callback, ValueChanged, disabled_bg, disabled_fg, pressable};
-use crate::render::{Border, BoxPaint, Color, IconData, Offset, Rect, Size};
+use crate::render::{
+  Border, BoxPaint, Color, IconData, Offset, Rect, Renderer, Size, draw_box, draw_focus,
+};
 use crate::theme::ThemeData;
 use crate::{Element, Icon, Icons, MainAxisSize, Padding, Row, Text, Widget, ui};
 
@@ -66,7 +68,8 @@ impl Element for ButtonBox {
   fn paint(&self, cx: &mut PaintCx) {
     let look = (self.look)(cx.theme(), self.on_pressed.is_some());
     let rect = cx.rect();
-    cx.renderer.draw_box(
+    draw_box(
+      &mut cx.renderer,
       rect,
       &BoxPaint {
         color: look.bg,
@@ -78,7 +81,7 @@ impl Element for ButtonBox {
     cx.paint_children();
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
-      cx.renderer.draw_focus(rect, color, self.radius);
+      draw_focus(&mut cx.renderer, rect, color, self.radius);
     }
   }
 }

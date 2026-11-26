@@ -51,12 +51,16 @@ thread_local! {
 }
 
 /// Installs the function called (possibly from any thread) whenever a signal
-/// change dirties an observer; the run loop uses it to schedule a rebuild.
-pub(crate) fn set_waker(waker: Option<Waker>) {
+/// change or `Repaint::mark` dirties the UI; the run loop uses it to schedule a redraw.
+pub fn set_redraw_waker(waker: Option<Waker>) {
   WAKER.set(waker)
 }
 
-fn wake() {
+pub(crate) fn set_waker(waker: Option<Waker>) {
+  set_redraw_waker(waker);
+}
+
+pub(crate) fn wake() {
   // Cloned out first so the waker may itself touch signals. Cloning (not
   // taking) keeps it installed for the next change.
   if let Some(waker) = WAKER.with(|w| w.borrow().clone()) {

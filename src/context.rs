@@ -15,7 +15,8 @@
 //! }
 //!
 //! fn main() {
-//!     run(ui!(Hello {}));
+//!     // Pass any `Renderer` backend to `run`:
+//!     // run(ui!(Hello {}), &mut backend);
 //! }
 //! ```
 
@@ -29,7 +30,7 @@ use std::rc::Rc;
 use anymap3::AnyMap;
 
 use crate::layout::{Constraints, LayoutCx, PaintCx, focus};
-use crate::render::Size;
+use crate::render::{Renderer, Scene, Size};
 use crate::signal::set_waker;
 use crate::task::TaskGroup;
 use crate::term::{Input, InputMode, RawTerminal, spawn_line_reader};
@@ -329,17 +330,6 @@ pub fn exit() {
 // Run loop
 // ---------------------------------------------------------------------------
 
-/// Prints the widget tree as text. There is no renderer backend yet, so this is the only output.
-fn draw(root: &Node) {
-  use std::io::Write;
-  let mut out = String::new();
-  root.debug_tree(0, &mut out);
-  out.push_str("---\n");
-  let mut stdout = std::io::stdout().lock();
-  let _ = stdout.write_all(out.as_bytes());
-  let _ = stdout.flush();
-}
-
 /// Turns one input line into key presses. Escape sequences for arrows, Shift-Tab and
 /// Delete become the `keys` constants; an empty line (just Enter) is `keys::ENTER`.
 pub fn parse_keys(line: &str) -> Vec<char> {
@@ -401,30 +391,29 @@ pub fn dispatch_event(event: &EventKey) -> EventResult {
 }
 
 /// Mounts the tree once, then loops on this thread: key presses are dispatched,
-/// and any signal change (from a key press or from an async task) wakes the loop to
-/// rebuild only the nodes that read it, then lay out and repaint. `exit()`, Ctrl+C,
-/// Ctrl+D or the end of input quits.
-///
-/// Each frame prints the widget tree as text (no renderer backend yet).
+/// and any signal change or `Repaint::mark()` wakes the loop to rebuild, lay out,
+/// re-record changed layers, and present the damaged region to `backend`. `exit()`,
+/// Ctrl+C, Ctrl+D or the end of input quits.
 ///
 /// When stdin and stdout are terminals, input is raw: every key acts at once, on the
 /// alternate screen, and the terminal is restored on exit. Otherwise (piped input, or
 /// `LOBO_INPUT=line`) it is read a line at a time; see `InputMode`.
 /// Tab moves the keyboard focus; Enter or space activates the focused widget.
-pub fn run(app: impl Into<Widget>) {
+pub fn run(app: impl Into<Widget>, backend: &mut dyn Renderer) {
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .build()
     .expect("failed to build tokio runtime");
 
   let local = tokio::task::LocalSet::new();
-  runtime.block_on(local.run_until(run_loop(app.into())));
+  runtime.block_on(local.run_until(run_loop(app.into(), backend)));
   set_waker(None);
   EXIT_NOTIFIER.with(|n| *n.borrow_mut() = None);
 }
 
-async fn run_loop(app: Widget) {
+async fn run_loop(app: Widget, backend: &mut dyn Renderer) {
   let root = Node::mount(app, Context::default());
+  let mut scene = Scene::new();
 
   let redraw = Rc::new(tokio::sync::Notify::new());
   {
@@ -456,9 +445,8 @@ async fn run_loop(app: Widget) {
     spawn_line_reader(tx);
   }
 
-  draw(&root);
+  root.present(&mut scene, backend);
   loop {
-    let mut repaint = false;
     tokio::select! {
       _ = exit_notify.notified() => {
         return;
@@ -475,14 +463,11 @@ async fn run_loop(app: Widget) {
           // Rebuild so the next key of the same line reaches the updated widgets.
           root.update();
         }
-        // Focus may have moved (or the terminal resized) even if no signal changed.
-        repaint = true;
       }
-      // A signal changed outside of key handling (e.g. an async task).
+      // A signal changed or `Repaint::mark` fired outside key handling.
       _ = redraw.notified() => {}
     }
-    if root.update() || repaint {
-      draw(&root);
-    }
+    root.update();
+    root.present(&mut scene, backend);
   }
 }

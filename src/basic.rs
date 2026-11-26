@@ -2,7 +2,7 @@
 //! sizing, flex, icons, scrolling lists and wrapping.
 
 use crate::layout::{Constraints, Flex, FlexFit, LayoutCx, PaintCx, focus};
-use crate::render::{Color, IconData, Offset, Rect, Size};
+use crate::render::{Color, IconData, Offset, Rect, Renderer, Size, draw_icon};
 use crate::{Element, Padding, Widget};
 
 // ---------------------------------------------------------------------------
@@ -513,7 +513,7 @@ impl Element for Icon {
   fn paint(&self, cx: &mut PaintCx) {
     let color = self.color.unwrap_or(cx.text_paint().color);
     let rect = cx.rect();
-    cx.renderer.draw_icon(rect, self.icon, color);
+    draw_icon(&mut cx.renderer, rect, self.icon, color);
   }
 }
 

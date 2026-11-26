@@ -4,7 +4,10 @@
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::common::{Callback, ValueChanged, focus_on_open, pressable, styled};
 use crate::material::containment::SheetData;
-use crate::render::{BoxPaint, Color, IconData, Offset, Rect, Size, TextPaint};
+use crate::render::{
+  BoxPaint, Color, IconData, Offset, Rect, Renderer, Size, TextPaint, draw_box, draw_focus,
+  draw_icon,
+};
 use crate::theme::TextStyle;
 use crate::{Element, Widget};
 
@@ -113,7 +116,7 @@ impl Element for NavItem {
     match self.style {
       NavStyle::Drawer => {
         let icon = Rect::new(r.x + 16.0, r.center().y - 12.0, 24.0, 24.0);
-        cx.renderer.draw_icon(icon, self.icon, icon_color);
+        draw_icon(&mut cx.renderer, icon, self.icon, icon_color);
         cx.renderer.draw_text(
           Offset::new(r.x + 52.0, r.center().y - text.height / 2.0),
           &label,
@@ -122,7 +125,7 @@ impl Element for NavItem {
       }
       _ => {
         let icon = pill.center_rect(Size::new(24.0, 24.0));
-        cx.renderer.draw_icon(icon, self.icon, icon_color);
+        draw_icon(&mut cx.renderer, icon, self.icon, icon_color);
         cx.renderer.draw_text(
           Offset::new(r.center().x - text.width / 2.0, pill.bottom() + 4.0),
           &label,
@@ -132,7 +135,7 @@ impl Element for NavItem {
     }
     if cx.is_focused() {
       let color = s.secondary;
-      cx.renderer.draw_focus(pill, color, 16.0);
+      draw_focus(&mut cx.renderer, pill, color, 16.0);
     }
   }
 }
@@ -341,7 +344,11 @@ impl Element for NavigationDrawer {
   fn paint(&self, cx: &mut PaintCx) {
     let color = cx.theme().color_scheme.surface_container_low;
     let rect = cx.rect();
-    cx.renderer.draw_box(rect, &BoxPaint { color, border: None, radius: 16.0, elevation: 1.0 });
+    draw_box(
+      &mut cx.renderer,
+      rect,
+      &BoxPaint { color, border: None, radius: 16.0, elevation: 1.0 },
+    );
     cx.renderer.push_clip(rect);
     cx.paint_children();
     cx.renderer.pop_clip();
@@ -382,7 +389,12 @@ impl Element for TabItem {
       TextPaint { bold: true, ..t.text_theme.title_small.clone().with_color(color).resolve(&t) };
     let text = cx.renderer.measure_text(&self.tab.text, &paint);
     let label_y = if let Some(icon) = self.tab.icon {
-      cx.renderer.draw_icon(Rect::new(r.center().x - 12.0, r.y + 10.0, 24.0, 24.0), icon, color);
+      draw_icon(
+        &mut cx.renderer,
+        Rect::new(r.center().x - 12.0, r.y + 10.0, 24.0, 24.0),
+        icon,
+        color,
+      );
       r.y + 36.0
     } else {
       r.center().y - text.height / 2.0
@@ -402,7 +414,7 @@ impl Element for TabItem {
     }
     if cx.is_focused() {
       let color = s.secondary;
-      cx.renderer.draw_focus(r.inflate(-4.0), color, 4.0);
+      draw_focus(&mut cx.renderer, r.inflate(-4.0), color, 4.0);
     }
   }
 }

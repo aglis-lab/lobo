@@ -9,7 +9,9 @@ use crate::material::common::{
   Callback, ValueChanged, control, disabled_fg, focus_on_open, pressable,
 };
 use crate::render::{
-  Border, BoxPaint, Color, IconData, Offset, Rect, Size, TextPaint, ToggleColors, TrackColors,
+  Border, BoxPaint, Color, IconData, Offset, Rect, Renderer, Size, TextPaint, ToggleColors,
+  TrackColors, draw_box, draw_checkbox, draw_focus, draw_icon, draw_radio, draw_slider,
+  draw_switch,
 };
 use crate::theme::{TextStyle, ThemeData};
 use crate::{Element, EventKey, Icons, KeyHandler, Widget, keys};
@@ -84,11 +86,11 @@ impl Element for CheckboxBody {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = toggle_colors(cx.theme(), self.on_changed.is_some());
     let rect = cx.rect();
-    cx.renderer.draw_checkbox(rect, self.value, &colors);
+    draw_checkbox(&mut cx.renderer, rect, self.value, &colors);
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      cx.renderer.draw_focus(rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 20.0);
     }
   }
 }
@@ -142,11 +144,11 @@ impl Element for RadioBody {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = toggle_colors(cx.theme(), self.on_changed.is_some());
     let rect = cx.rect();
-    cx.renderer.draw_radio(rect, self.group_value == Some(self.value), &colors);
+    draw_radio(&mut cx.renderer, rect, self.group_value == Some(self.value), &colors);
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      cx.renderer.draw_focus(rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 20.0);
     }
   }
 }
@@ -197,11 +199,11 @@ impl Element for SwitchBody {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = toggle_colors(cx.theme(), self.on_changed.is_some());
     let rect = cx.rect();
-    cx.renderer.draw_switch(rect, self.value, &colors);
+    draw_switch(&mut cx.renderer, rect, self.value, &colors);
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      cx.renderer.draw_focus(rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 20.0);
     }
   }
 }
@@ -298,11 +300,11 @@ impl Element for SliderBody {
     };
     let rect = cx.rect();
     let track = Rect::new(rect.x + 12.0, rect.y, (rect.width - 24.0).max(0.0), rect.height);
-    cx.renderer.draw_slider(track, self.fraction(), &colors);
+    draw_slider(&mut cx.renderer, track, self.fraction(), &colors);
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      cx.renderer.draw_focus(rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 20.0);
     }
   }
 }
@@ -392,7 +394,7 @@ impl Element for ChipBox {
         elevation: 0.0,
       }
     };
-    cx.renderer.draw_box(r, &paint);
+    draw_box(&mut cx.renderer, r, &paint);
     let text = self.paint_text(&t);
     let (l, _) = self.pads();
     let mut x = r.x + l;
@@ -402,18 +404,18 @@ impl Element for ChipBox {
       } else {
         text.color
       };
-      cx.renderer.draw_icon(Rect::new(x, r.center().y - 9.0, 18.0, 18.0), icon, color);
+      draw_icon(&mut cx.renderer, Rect::new(x, r.center().y - 9.0, 18.0, 18.0), icon, color);
       x += 18.0 + 8.0;
     }
     let size = cx.renderer.measure_text(&self.label, &text);
     cx.renderer.draw_text(Offset::new(x, r.center().y - size.height / 2.0), &self.label, &text);
     if self.on_deleted.is_some() {
       let at = Rect::new(x + size.width + 8.0, r.center().y - 9.0, 18.0, 18.0);
-      cx.renderer.draw_icon(at, Icons::CLOSE, text.color);
+      draw_icon(&mut cx.renderer, at, Icons::CLOSE, text.color);
     }
     if cx.is_focused() {
       let color = s.secondary;
-      cx.renderer.draw_focus(r, color, 8.0);
+      draw_focus(&mut cx.renderer, r, color, 8.0);
     }
   }
 }
@@ -625,7 +627,11 @@ impl Element for MenuPanel {
   fn paint(&self, cx: &mut PaintCx) {
     let color = cx.theme().color_scheme.surface_container;
     let rect = cx.rect();
-    cx.renderer.draw_box(rect, &BoxPaint { color, border: None, radius: 4.0, elevation: 3.0 });
+    draw_box(
+      &mut cx.renderer,
+      rect,
+      &BoxPaint { color, border: None, radius: 4.0, elevation: 3.0 },
+    );
     focus_on_open(cx);
     cx.paint_children();
   }
@@ -685,7 +691,12 @@ impl Element for MenuItemBody {
         disabled_fg(cx.theme())
       };
       let r = cx.rect();
-      cx.renderer.draw_icon(Rect::new(r.x + 12.0, r.center().y - 12.0, 24.0, 24.0), icon, color);
+      draw_icon(
+        &mut cx.renderer,
+        Rect::new(r.x + 12.0, r.center().y - 12.0, 24.0, 24.0),
+        icon,
+        color,
+      );
     }
     if cx.is_focused() {
       let color = cx.theme().color_scheme.on_surface.with_opacity(0.1);
@@ -696,7 +707,7 @@ impl Element for MenuItemBody {
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      cx.renderer.draw_focus(rect.inflate(-2.0), color, 0.0);
+      draw_focus(&mut cx.renderer, rect.inflate(-2.0), color, 0.0);
     }
   }
 }
@@ -878,8 +889,9 @@ impl Element for CalendarDatePickerBody {
       &header,
     );
     let arrows = Rect::new(r.right() - 88.0, r.y + 4.0, 40.0, 40.0);
-    cx.renderer.draw_icon(arrows, Icons::CHEVRON_LEFT, s.on_surface_variant);
-    cx.renderer.draw_icon(
+    draw_icon(&mut cx.renderer, arrows, Icons::CHEVRON_LEFT, s.on_surface_variant);
+    draw_icon(
+      &mut cx.renderer,
       arrows.translate(Offset::new(40.0, 0.0)),
       Icons::CHEVRON_RIGHT,
       s.on_surface_variant,
@@ -917,7 +929,7 @@ impl Element for CalendarDatePickerBody {
       // Ring around the selected day rather than the whole calendar.
       let color = cx.theme().color_scheme.secondary;
       let cell = self.day_rect(cx.rect(), self.selected.day);
-      cx.renderer.draw_focus(cell, color, DAY / 2.0);
+      draw_focus(&mut cx.renderer, cell, color, DAY / 2.0);
     }
   }
 }
@@ -1003,7 +1015,8 @@ impl Element for TimeField {
       (s.surface_container_highest, s.on_surface)
     };
     let border = (self.part == TimePart::Period).then_some(Border { color: s.outline, width: 1.0 });
-    cx.renderer.draw_box(
+    draw_box(
+      &mut cx.renderer,
       r,
       &BoxPaint {
         color: if self.part == TimePart::Period && !focused { Color::TRANSPARENT } else { bg },

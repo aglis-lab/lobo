@@ -2,7 +2,10 @@
 
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::common::{ValueChanged, control, disabled_fg};
-use crate::render::{Border, BoxPaint, Color, IconData, Offset, Rect, Size, TextPaint};
+use crate::render::{
+  Border, BoxPaint, Color, IconData, Offset, Rect, Renderer, Size, TextPaint, draw_box, draw_caret,
+  draw_icon,
+};
 use crate::{Element, EventKey, KeyHandler, Signal, Widget, keys};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -133,7 +136,8 @@ impl Element for TextFieldBody {
           s.outline
         };
         let width = if focused { 2.0 } else { 1.0 };
-        cx.renderer.draw_box(
+        draw_box(
+          &mut cx.renderer,
           r,
           &BoxPaint {
             color: Color::TRANSPARENT,
@@ -157,7 +161,8 @@ impl Element for TextFieldBody {
 
     let mut x = r.x + 16.0;
     if let Some(icon) = self.prefix_icon {
-      cx.renderer.draw_icon(
+      draw_icon(
+        &mut cx.renderer,
         Rect::new(r.x + 12.0, r.center().y - 12.0, 24.0, 24.0),
         icon,
         s.on_surface_variant,
@@ -165,7 +170,8 @@ impl Element for TextFieldBody {
       x = r.x + 52.0;
     }
     if let Some(icon) = self.suffix_icon {
-      cx.renderer.draw_icon(
+      draw_icon(
+        &mut cx.renderer,
         Rect::new(r.right() - 36.0, r.center().y - 12.0, 24.0, 24.0),
         icon,
         s.on_surface_variant,
@@ -222,7 +228,7 @@ impl Element for TextFieldBody {
     }
     if focused {
       let w = cx.renderer.measure_text(&visible, &body).width;
-      cx.renderer.draw_caret(Offset::new(x + w, text_y), line_h, s.primary);
+      draw_caret(&mut cx.renderer, Offset::new(x + w, text_y), line_h, s.primary);
     }
   }
 }

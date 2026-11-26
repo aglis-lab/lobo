@@ -124,11 +124,31 @@ impl Element for Hello {
   }
 }
 
+struct NullRenderer;
+
+impl Renderer for NullRenderer {
+  fn size(&self) -> Size {
+    HD_720
+  }
+  fn measure_text(&self, text: &str, paint: &TextPaint) -> Size {
+    Size::new(text.chars().count() as f32 * paint.size * 0.5, paint.size)
+  }
+  fn clear(&mut self, _: Color) {}
+  fn fill_rect(&mut self, _: Rect, _: Color, _: f32) {}
+  fn stroke_rect(&mut self, _: Rect, _: Border, _: f32) {}
+  fn draw_line(&mut self, _: Offset, _: Offset, _: Color, _: f32) {}
+  fn fill_circle(&mut self, _: Offset, _: f32, _: Color) {}
+  fn stroke_circle(&mut self, _: Offset, _: f32, _: Border) {}
+  fn draw_text(&mut self, _: Offset, _: &str, _: &TextPaint) {}
+  fn push_clip(&mut self, _: Rect) {}
+  fn pop_clip(&mut self) {}
+}
+
 fn main() {
   dotenvy::dotenv().ok();
   env_logger::init();
 
   let app = ui!(Root { child: Provider { create: |_| Dashboard::default(), child: Hello {} } });
 
-  run(app);
+  run(app, &mut NullRenderer);
 }

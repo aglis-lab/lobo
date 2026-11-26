@@ -1,7 +1,8 @@
 # Retained rendering
 
 Design for drawing only what changed, in batches, without putting any of that in `lobo`.
-Status: **proposal**. See [renderer.md](renderer.md) for the `Renderer` trait this builds on.
+Status: **implemented** in `renderer`, `lobo`, and `renderer-cpu` (`renderer-gpu` remains empty).
+See [renderer.md](renderer.md) for the `Renderer` trait this builds on.
 
 ## Problem
 
@@ -225,14 +226,14 @@ the scene; it is `lobo` state.
 lobo::run(app, &mut backend)         // backend: &mut dyn Renderer
 ```
 
-Each loop turn: dispatch input, `root.update()`, relayout if needed, walk (re-record changed
-nodes into the scene), `scene.present(&mut backend)`. `lobo` calls `present`; everything inside
-it lives in `renderer`.
+Each loop turn: dispatch input, `root.update()`, `root.present(&mut scene, backend)` (which
+relayouts if needed, walks and re-records changed nodes into the scene, and calls
+`scene.present(backend)`). `lobo` calls `present`; everything inside `Scene` lives in `renderer`.
 
 ## Behaviour changes to be aware of
 
-- `render_frame` is removed; `PaintCx::renderer` is a recorder. `measure_text` and `size` still
-  reach the real backend.
+- `render_frame` is removed (replaced by `Node::present(&mut scene, &mut backend)`);
+  `PaintCx::renderer` is a `Recorder<'a>`. `measure_text` and `size` still reach the real backend.
 - A widget that draws from state that is neither a `Signal`, nor part of its widget / context /
   rect (for example a `Cell` mutated in an event handler) will not repaint until it calls
   `Repaint::mark`.
@@ -261,17 +262,18 @@ In `lobo` (with a null / spying backend):
 - closing a menu clears the overlay area
 - Tab order and focus rings survive caching
 
-## Implementation steps
+## Implementation status
 
-1. `renderer`: move geometry, paint types and the `Renderer` trait out of `lobo`; add `DrawCmd`,
-   `Recorder`, `Scene` and `draw_batch`, with their tests. The widget-level `draw_*` helpers
-   become free functions in `lobo` instead of moving. `lobo` re-exports. Do this in
-   slices (types, then recorder, then scene), each tested, before touching `lobo`.
-2. `lobo`: record into the scene; `Repaint` handle; focus cache; relayout condition; remove
-   `render_frame`.
-3. `lobo`: `run(app, backend)`.
-4. `renderer-cpu` (`vello_cpu`), then `renderer-gpu` (`wgpu`), each with a gallery example and
-   the render tests that were removed with the terminal backend.
+1. **Done**: `renderer` owns geometry, paint types, `Renderer`, `DrawCmd`, `Recorder`, `Scene`, and
+   `draw_batch`, with spy-backend tests in `renderer/tests/scene.rs`. Widget-level `draw_*` helpers
+   live as free functions in `lobo` (`src/render/mod.rs`), and `Rect::deflate` takes four floats.
+2. **Done**: `lobo` records into `Scene` via `Node::present`, provides `Repaint` on `NodeCx`, caches
+   focus registrations, and skips relayout when clean (`tests/retained.rs`).
+3. **Done**: `lobo::run(app, backend)` drives the retained loop.
+4. **Done (CPU)**: `renderer-cpu` implements `PixmapRenderer` via `vello_cpu`, with pixel-exact
+   partial-vs-full redraw tests (`renderer-cpu/tests/retained.rs`), render tests
+   (`renderer-cpu/tests/render.rs`), and `renderer-cpu/examples/gallery.rs`. `renderer-gpu` (`wgpu`)
+   remains next.
 
 ## Open questions
 
@@ -280,5 +282,3 @@ In `lobo` (with a null / spying backend):
   input reaches `lobo` without `lobo` naming the backend, is not designed here.
 - **Relayout boundaries.** Is full-tree layout acceptable for large lists?
 - **Animation.** A frame clock calls `Repaint::mark` on animating nodes each tick; not designed here.
-- **`Padding` in geometry.** `Rect::deflate` takes `lobo::Padding`; it must move to `renderer`
-  (or `deflate` takes four floats) when the geometry types move.

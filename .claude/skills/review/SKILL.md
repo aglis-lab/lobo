@@ -10,7 +10,7 @@ description: >-
 metadata:
   author: project-maintainers
   category: Engineering
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Reviewing lobo
@@ -78,6 +78,13 @@ Wrong facts in docs and skills are high-severity: future AI sessions act on them
 - Lifecycle edges: first frame, resize, unmount, hide-then-show, re-parent.
 - Each listed test is runnable with what exists (spy `Renderer`, no window).
 - Other docs that mention the same thing are updated in the same change.
+
+**File size** (every changed `.rs` file; limits in `lobo-project`, Style and Testing)
+- A source file at 1,000 lines or more → finding; name the seam to split along.
+- An inline `#[cfg(test)] mod tests` at 500 lines or more → finding; move it to
+  `<module>/tests.rs`.
+- A test file at 1,000 lines or more → finding; split by behaviour.
+- Count with `wc -l`. Report these as `simplify`.
 
 **Manifests, licence, skills**
 - Every crate in the workspace has the same `license`; it matches `LICENSE`.

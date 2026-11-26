@@ -9,7 +9,7 @@ description: >-
 metadata:
   author: project-maintainers
   category: Engineering
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # Keep it simple
@@ -37,7 +37,8 @@ Answer these in your head (or in one short line to the user when the task is big
 1. **What is the one thing asked?** Build that. Not the "while I'm here" extras, not the
    version that also handles cases nobody named.
 2. **Where does it already almost exist?** Extend the nearest function, file or type. A new
-   file, crate or module needs a reason you can say in one sentence.
+   file, crate or module needs a reason you can say in one sentence. A file at its size limit
+   (`lobo-project`, Style and Testing) is one such reason.
 3. **How will it be tested?** Pick the cheapest real test: a pure function test, then a test
    through a small spy `Renderer`, and only then a new seam.
 4. **What is the smallest diff?** If the plan touches more than ~5 files or adds a new
@@ -89,6 +90,9 @@ hearing it, build their version.
   on it). Don't build an error hierarchy.
 - **Follow the file you are in.** Match its names and patterns; read the surrounding widget or
   module before adding a new pattern.
+- **Split at a seam, when a limit forces it.** A file or test module at its line limit
+  (`lobo-project`, Style and Testing) moves one group of related items out. Split by job, not
+  by line count, and don't add a layer just to make a file shorter.
 
 ## Testable without complexity
 
@@ -131,5 +135,7 @@ order), not for structure. Backends depend on the released crates; don't copy th
 ## Finish
 
 - Run `cargo fmt`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`.
+- Check the line count of each file you touched against the limits in `lobo-project` (Style,
+  Testing) before reporting.
 - Report: what changed, where, how it was tested, and anything you chose **not** to build
   (one line each) so the user can ask for it.

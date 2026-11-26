@@ -9,7 +9,7 @@ description: >-
 metadata:
   author: project-maintainers
   category: Engineering
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Lobo project guide
@@ -79,6 +79,11 @@ Run these for what you touched. Report real output; if a check fails, say so.
 - Edition 2024. `pub(crate)` by default; widen only for a real consumer.
 - Comments explain why, not what. Doc comments (`///`) on public items, one or two lines.
 - Docs in `docs/` are plain Markdown, short, with the decision first.
+- **File size (Rust).** Each `.rs` file stays under 1,000 lines. Count with `wc -l` (blank
+  lines and comments included). At 1,000, split it: move one related group of items into a
+  sibling file (`src/tree.rs` declares `mod reconcile;`, body in `src/tree/reconcile.rs`) or a
+  new module directory. Split along an existing seam, one job per file; never `part1.rs` /
+  `part2.rs`.
 
 ## Testing
 
@@ -88,6 +93,13 @@ Run these for what you touched. Report real output; if a check fails, say so.
 - No backend exists, so layout and focus tests use a small no-op `Renderer` (see
   `tests/reconcile.rs`). When a backend exists, prefer a spy `Renderer` that records calls.
 - Test behaviour a library user sees. A test with more setup than assertions is a smell.
+- **Unit tests stay under 500 lines.** An inline `#[cfg(test)] mod tests` that reaches 500
+  moves to its own file: `src/tree.rs` keeps `#[cfg(test)] mod tests;` and the body goes in
+  `src/tree/tests.rs`.
+- **Test files stay under 1,000 lines.** At 1,000, split by behaviour into several files:
+  `src/tree/tests.rs` declares `mod keys; mod layout;`, with bodies in
+  `src/tree/tests/keys.rs` and `src/tree/tests/layout.rs`. The same 1,000-line limit applies
+  to `tests/*.rs`; split those into more top-level files, since each one is its own crate.
 
 ## Rules for AI work here
 

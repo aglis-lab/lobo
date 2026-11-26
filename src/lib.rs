@@ -24,8 +24,8 @@ pub use layout::{Constraints, Flex, FlexFit, LayoutCx, PaintCx, focus, render_fr
 pub use material::*;
 pub use provider::*;
 pub use render::{
-  Border, BoxPaint, Color, HD_720, IconData, Offset, Rect, Renderer, Size, TerminalRenderer,
-  TextPaint, ToggleColors, TrackColors,
+  Border, BoxPaint, Color, HD_720, IconData, Offset, Rect, Renderer, Size, TextPaint, ToggleColors,
+  TrackColors,
 };
 pub use signal::*;
 pub use task::*;

@@ -5,13 +5,9 @@
 //! clipping). The widget-level methods (`draw_checkbox`, `draw_switch`, ...) have
 //! default implementations built from those primitives, so a pixel backend
 //! (a texture, `wgpu`, Vello) only has to implement the primitives. A backend with a
-//! coarse grid, like [`TerminalRenderer`], overrides them to stay readable.
-
-pub mod terminal;
+//! coarse grid overrides them to stay readable.
 
 use std::ops::{Add, Sub};
-
-pub use terminal::TerminalRenderer;
 
 use crate::{Padding, Widget};
 

@@ -28,8 +28,8 @@ use std::rc::Rc;
 
 use anymap3::AnyMap;
 
-use crate::layout::{Constraints, LayoutCx, PaintCx, focus, render_frame};
-use crate::render::{Size, TerminalRenderer};
+use crate::layout::{Constraints, LayoutCx, PaintCx, focus};
+use crate::render::Size;
 use crate::signal::set_waker;
 use crate::task::TaskGroup;
 use crate::term::{Input, InputMode, RawTerminal, spawn_line_reader};
@@ -329,59 +329,12 @@ pub fn exit() {
 // Run loop
 // ---------------------------------------------------------------------------
 
-/// How `run` shows each frame. Set with the `LOBO_RENDER` environment variable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenderMode {
-  /// `LOBO_RENDER=ansi` (default): the 720p frame in 24-bit color, redrawn in place.
-  Ansi,
-  /// `LOBO_RENDER=plain`: the frame's characters only, frames separated by `---`.
-  Plain,
-  /// `LOBO_RENDER=tree`: the widget tree as text, no layout.
-  Tree,
-}
-
-impl RenderMode {
-  pub fn from_env() -> Self {
-    match std::env::var("LOBO_RENDER").as_deref() {
-      Ok("plain") => RenderMode::Plain,
-      Ok("tree") => RenderMode::Tree,
-      _ => RenderMode::Ansi,
-    }
-  }
-}
-
-fn draw(root: &Node, mode: RenderMode, input: InputMode, renderer: &mut TerminalRenderer) {
-  use std::fmt::Write as _;
+/// Prints the widget tree as text. There is no renderer backend yet, so this is the only output.
+fn draw(root: &Node) {
   use std::io::Write;
-  let out = match mode {
-    RenderMode::Tree => {
-      let mut out = String::new();
-      root.debug_tree(0, &mut out);
-      out + "---\n"
-    }
-    RenderMode::Plain => {
-      render_frame(root, renderer);
-      renderer.to_plain_text() + "---\n"
-    }
-    RenderMode::Ansi if input == InputMode::Raw => {
-      render_frame(root, renderer);
-      // Each row at its own position, no newlines (raw mode has no carriage return),
-      // and only the rows the terminal can show (wrapping is off, so wide rows are cut).
-      let visible = crate::term::size()
-        .filter(|(_, rows)| *rows > 0)
-        .map_or(usize::MAX, |(_, rows)| rows as usize);
-      let mut out = String::new();
-      for (i, row) in renderer.ansi_rows().iter().enumerate().take(visible) {
-        let _ = write!(out, "\x1b[{};1H{row}", i + 1);
-      }
-      out
-    }
-    RenderMode::Ansi => {
-      render_frame(root, renderer);
-      // Home + clear, then the frame; the typed line follows it.
-      format!("\x1b[H\x1b[2J{}", renderer.to_ansi())
-    }
-  };
+  let mut out = String::new();
+  root.debug_tree(0, &mut out);
+  out.push_str("---\n");
   let mut stdout = std::io::stdout().lock();
   let _ = stdout.write_all(out.as_bytes());
   let _ = stdout.flush();
@@ -452,8 +405,7 @@ pub fn dispatch_event(event: &EventKey) -> EventResult {
 /// rebuild only the nodes that read it, then lay out and repaint. `exit()`, Ctrl+C,
 /// Ctrl+D or the end of input quits.
 ///
-/// Frames are drawn by a `TerminalRenderer` on a 1280x720 canvas (160x45 cells);
-/// see `RenderMode` for the other outputs.
+/// Each frame prints the widget tree as text (no renderer backend yet).
 ///
 /// When stdin and stdout are terminals, input is raw: every key acts at once, on the
 /// alternate screen, and the terminal is restored on exit. Otherwise (piped input, or
@@ -473,8 +425,6 @@ pub fn run(app: impl Into<Widget>) {
 
 async fn run_loop(app: Widget) {
   let root = Node::mount(app, Context::default());
-  let mode = RenderMode::from_env();
-  let mut renderer = TerminalRenderer::hd720();
 
   let redraw = Rc::new(tokio::sync::Notify::new());
   {
@@ -506,7 +456,7 @@ async fn run_loop(app: Widget) {
     spawn_line_reader(tx);
   }
 
-  draw(&root, mode, input_mode, &mut renderer);
+  draw(&root);
   loop {
     let mut repaint = false;
     tokio::select! {
@@ -522,11 +472,8 @@ async fn run_loop(app: Widget) {
         };
         for key in keys {
           dispatch_event(&key);
-          // Rebuild and re-lay-out (without printing) so the next key of the same
-          // line reaches the updated widgets: `+++` on a slider moves it three steps.
-          if root.update() {
-            render_frame(&root, &mut renderer);
-          }
+          // Rebuild so the next key of the same line reaches the updated widgets.
+          root.update();
         }
         // Focus may have moved (or the terminal resized) even if no signal changed.
         repaint = true;
@@ -535,7 +482,7 @@ async fn run_loop(app: Widget) {
       _ = redraw.notified() => {}
     }
     if root.update() || repaint {
-      draw(&root, mode, input_mode, &mut renderer);
+      draw(&root);
     }
   }
 }

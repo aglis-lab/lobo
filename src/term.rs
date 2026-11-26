@@ -163,8 +163,3 @@ pub(crate) fn spawn_line_reader(tx: UnboundedSender<Input>) {
     let _ = tx.send(Input::Quit);
   });
 }
-
-/// Terminal size in cells, if known.
-pub(crate) fn size() -> Option<(u16, u16)> {
-  terminal::size().ok()
-}

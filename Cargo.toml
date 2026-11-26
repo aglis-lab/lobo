@@ -15,7 +15,7 @@ anyhow = "1.0.104"
 crossterm = "0.29.0"
 
 [workspace]
-members = ["lobo-macros"]
+members = ["lobo-macros", "renderer", "renderer-cpu", "renderer-gpu"]
 
 [dev-dependencies]
 dotenvy = "0.15.7"

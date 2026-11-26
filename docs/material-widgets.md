@@ -4,7 +4,7 @@ Coverage of the Flutter Material component catalog
 (<https://docs.flutter.dev/ui/widgets/material>, read on 2026-11-25: 28 entries in 6 groups)
 by Lobo's widgets, rendered through the `Renderer` trait in the terminal at 720p.
 
-Run `cargo run --example gallery` to see all of them (make the terminal at least 160x46).
+There is no renderer backend right now (the terminal one was removed), so widgets cannot be seen yet.
 
 **Status**
 - **Done**: the component and its main variants work, with keyboard input where it applies.
@@ -96,9 +96,6 @@ These aren't catalog entries, but the components need them:
   `draw_circular_progress`, `draw_focus`, `draw_caret`) have default implementations
   built from the primitives. A future texture backend only needs the primitives, and
   can override the rest for better quality.
-- `TerminalRenderer` (`src/render/terminal.rs`) draws a 1280x720 logical-pixel canvas into 160x45
-  cells (8x16 px each) with 24-bit ANSI color. Rects shorter than 44 px collapse to a single row,
-  so a 40 px button is one row. Small controls are drawn as glyphs (`[✓]`, `◉`, `━━●──`).
 - Layout is in logical pixels using real Material sizes, so the same tree should lay out
   identically on a pixel backend.
 - `LOBO_RENDER=plain` prints frames as plain text (used for tests and piping), and

@@ -6,6 +6,27 @@ use std::rc::Rc;
 
 use lobo::*;
 
+/// Draws nothing; `render_frame` with it still lays out and registers focus.
+struct Null;
+
+impl Renderer for Null {
+  fn size(&self) -> Size {
+    HD_720
+  }
+  fn measure_text(&self, text: &str, paint: &TextPaint) -> Size {
+    Size::new(text.chars().count() as f32 * paint.size * 0.5, paint.size)
+  }
+  fn clear(&mut self, _: Color) {}
+  fn fill_rect(&mut self, _: Rect, _: Color, _: f32) {}
+  fn stroke_rect(&mut self, _: Rect, _: Border, _: f32) {}
+  fn draw_line(&mut self, _: Offset, _: Offset, _: Color, _: f32) {}
+  fn fill_circle(&mut self, _: Offset, _: f32, _: Color) {}
+  fn stroke_circle(&mut self, _: Offset, _: f32, _: Border) {}
+  fn draw_text(&mut self, _: Offset, _: &str, _: &TextPaint) {}
+  fn push_clip(&mut self, _: Rect) {}
+  fn pop_clip(&mut self) {}
+}
+
 /// Records its lifecycle, and how many times it was built, in shared logs.
 #[derive(Widget)]
 struct Probe {
@@ -165,46 +186,6 @@ fn an_unchanged_child_widget_is_not_rebuilt() {
 }
 
 #[test]
-fn node_state_survives_a_parent_rebuild() {
-  // A `ListView` keeps its scroll offset in node state; a parent rebuild no longer resets it.
-  #[derive(Widget)]
-  struct Scrolled {}
-  impl Element for Scrolled {
-    fn layout(&self, cx: &mut LayoutCx, constraints: Constraints) -> Size {
-      *cx.state::<u32>().borrow_mut() += 1;
-      cx.layout_stacked(constraints)
-    }
-    fn paint(&self, cx: &mut PaintCx) {
-      let frames = *cx.state::<u32>().borrow();
-      let text = format!("frames={frames}");
-      let at = cx.rect().origin();
-      cx.renderer.draw_text(at, &text, &TextPaint::default());
-    }
-  }
-
-  #[derive(Widget)]
-  struct Parent {
-    tick: Signal<i32>,
-  }
-  impl Element for Parent {
-    fn build(&self, _context: &Context) -> Option<Widget> {
-      self.tick.get();
-      Some(ui!(Scrolled {}))
-    }
-  }
-
-  let tick = Signal::new(0);
-  let node = Node::mount(ui!(Parent { tick: tick.clone() }), Context::default());
-  let mut r = TerminalRenderer::hd720();
-  render_frame(&node, &mut r);
-  render_frame(&node, &mut r);
-  tick.set(1);
-  assert!(node.update());
-  render_frame(&node, &mut r);
-  assert!(r.to_plain_text().contains("frames=3"), "{}", r.to_plain_text());
-}
-
-#[test]
 fn focus_and_listener_order_survive_a_parent_rebuild() {
   global_events.clear();
   let pressed = Rc::new(RefCell::new(Vec::new()));
@@ -233,7 +214,7 @@ fn focus_and_listener_order_survive_a_parent_rebuild() {
     ui!(Buttons { round: round.clone(), pressed: pressed.clone() }),
     Context::default(),
   );
-  let mut r = TerminalRenderer::hd720();
+  let mut r = Null;
   render_frame(&node, &mut r);
   let listeners = global_events.count();
   focus::set(Some(1));

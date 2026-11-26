@@ -1,0 +1,20 @@
+# Formatting rules for lobo. Run `cargo fmt` (or format-on-save via rust-analyzer).
+# Stable rustfmt options only, so no nightly toolchain is needed.
+
+edition = "2024"
+newline_style = "Unix"
+
+# Widget trees nest deeply; 2 spaces keeps a tree readable and leaves room
+# before `max_width`. rustfmt silently skips a whole `ui!(...)` call when any
+# line in it can't fit, so the extra room matters.
+tab_spaces = 2
+max_width = 100
+
+# Let short literals stay on one line up to `max_width` instead of rustfmt's
+# tiny defaults (a struct literal wider than 18 chars is otherwise exploded):
+#   padding: Padding { left: 8.0, top: 4.0 },
+#   Container { child: Text { text: "Body" } },
+use_small_heuristics = "Max"
+
+# `Text { text: text }` -> `Text { text }`, inside `ui!` too.
+use_field_init_shorthand = true

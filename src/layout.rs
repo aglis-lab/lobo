@@ -10,11 +10,13 @@
 //! move the focus, and the focused listener gets keys before the global ones.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::Padding;
+use crate::anim::{AnimatedF32, Curve};
+use crate::pointer::{self, PointerCallback, PointerRegion};
 use crate::render::{Offset, Recorder, Rect, Renderer, Scene, Size, TextPaint};
 use crate::theme::{TextStyle, ThemeData};
 use crate::tree::{Node, WalkEvent};
@@ -248,6 +250,14 @@ impl LayoutCx<'_> {
 // Paint
 // ---------------------------------------------------------------------------
 
+/// Interaction state propagated down the paint walk from an enclosing `InputEvent`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct InteractionState {
+  pub(crate) focused: bool,
+  pub(crate) hovered: bool,
+  pub(crate) pressed: bool,
+}
+
 /// What a widget's `paint` gets: the recorder, where it was laid out, and its children.
 pub struct PaintCx<'a> {
   pub renderer: Recorder<'a>,
@@ -255,12 +265,13 @@ pub struct PaintCx<'a> {
   pub(crate) kids: &'a [Rc<Node>],
   pub(crate) theme: &'a ThemeData,
   pub(crate) style: &'a TextStyle,
-  /// Inside the focused `InputEvent` (or it is this widget).
-  pub(crate) focused: bool,
+  /// Inside the focused/hovered/pressed `InputEvent` (or it is this widget).
+  pub(crate) interaction: InteractionState,
+  pub(crate) paint_dirty: &'a Cell<bool>,
   pub(crate) state: &'a RefCell<Option<Rc<dyn Any>>>,
   pub(crate) backend: &'a dyn Renderer,
   pub(crate) scene: &'a mut Scene,
-  pub(crate) overlays: &'a mut VecDeque<(Rc<Node>, Offset, bool)>,
+  pub(crate) overlays: &'a mut VecDeque<(Rc<Node>, Offset, InteractionState)>,
   pub(crate) events: &'a mut Vec<WalkEvent>,
 }
 
@@ -287,7 +298,7 @@ impl PaintCx<'_> {
     self.events.push(WalkEvent::Child(i));
     self.kids[i].walk_paint(
       self.rect.origin(),
-      self.focused,
+      self.interaction,
       self.scene,
       self.backend,
       self.overlays,
@@ -298,7 +309,7 @@ impl PaintCx<'_> {
   pub fn paint_child_on_top(&mut self, i: usize) {
     self.renderer.overlay(self.kids[i].layer_id);
     self.events.push(WalkEvent::Overlay(i));
-    self.overlays.push_back((self.kids[i].clone(), self.rect.origin(), self.focused));
+    self.overlays.push_back((self.kids[i].clone(), self.rect.origin(), self.interaction));
   }
 
   /// This widget's bounds on the canvas.
@@ -326,16 +337,99 @@ impl PaintCx<'_> {
 
   /// Whether this widget is inside the keyboard-focused `InputEvent`.
   pub fn is_focused(&self) -> bool {
-    self.focused
+    self.interaction.focused
+  }
+
+  /// Whether the pointer is currently hovering over this widget's focusable `InputEvent`.
+  pub fn is_hovered(&self) -> bool {
+    self.interaction.hovered
+  }
+
+  /// Whether the primary pointer button is currently pressed on this widget's `InputEvent`.
+  pub fn is_pressed(&self) -> bool {
+    self.interaction.pressed
+  }
+
+  /// Marks this node dirty for the next frame and requests an animation frame.
+  /// Internal to framework widgets; user code should use declarative animation widgets
+  /// (`AnimatedValue`, `AnimatedSpring`) or `CustomPaint` + `CustomPainter::should_repaint`.
+  pub(crate) fn request_repaint(&self) {
+    self.paint_dirty.set(true);
+    crate::anim::request_frame();
+  }
+
+  /// Smoothly animates a persistent `f32` value toward `target` over `duration_ms`.
+  /// Automatically schedules follow-up frames only for this node while animating.
+  pub fn animate_f32(&self, target: f32, duration_ms: f32, curve: Curve) -> f32 {
+    let state = self.state::<AnimatedF32>();
+    let (val, active) = state.borrow_mut().advance(target, duration_ms, curve);
+    if active {
+      self.paint_dirty.set(true);
+    }
+    val
+  }
+
+  /// Smoothly animates a persistent `f32` value toward `target` using damped spring physics.
+  /// When `repeat_period_ms` is `Some(period)`, continuously alternates the spring target
+  /// between `1.0` and `0.0` every `period / 2` ms. Automatically schedules follow-up frames.
+  pub fn animate_spring(&self, target: f32, repeat_period_ms: Option<f32>) -> f32 {
+    #[derive(Default)]
+    struct SpringLoopState {
+      spring: crate::anim::Spring,
+      phase: crate::anim::LoopingPhase,
+    }
+    let state = self.state::<SpringLoopState>();
+    let mut st = state.borrow_mut();
+    let eff_target = if let Some(period) = repeat_period_ms {
+      let p = st.phase.sample(period);
+      if p < 0.5 { 1.0 } else { 0.0 }
+    } else {
+      target
+    };
+    let (val, active) = st.spring.advance(eff_target);
+    if active || (repeat_period_ms.is_some() && crate::anim::is_enabled()) {
+      self.paint_dirty.set(true);
+    }
+    val
+  }
+
+  /// Returns a continuously looping `0.0..1.0` phase over `period_ms`.
+  /// Automatically schedules follow-up frames only for this node while animations are enabled.
+  pub fn animate_loop(&self, period_ms: f32) -> f32 {
+    let state = self.state::<crate::anim::LoopingPhase>();
+    let p = state.borrow().sample(period_ms);
+    if crate::anim::is_enabled() {
+      self.paint_dirty.set(true);
+    }
+    p
   }
 
   /// Adds this widget to the Tab order under `id` (a `global_events` focus id);
-  /// returns whether it has the focus. Its subtree then sees `is_focused`.
-  pub(crate) fn register_focus(&mut self, id: &str) -> bool {
+  /// returns whether it has the focus. Its subtree then sees `is_focused`, `is_hovered`,
+  /// and `is_pressed`.
+  pub(crate) fn register_focus(&mut self, id: &str, activate_on_click: bool) -> bool {
     let focused = focus::register(id, self.rect);
-    self.events.push(WalkEvent::Focus { id: id.to_string(), was_focused: focused });
-    self.focused |= focused;
+    pointer::register_focus_target(id, self.rect, activate_on_click);
+    let hovered = pointer::is_focus_hovered(id);
+    let pressed = pointer::is_focus_pressed(id);
+    self.events.push(WalkEvent::Focus {
+      id: id.to_string(),
+      was_focused: focused,
+      was_hovered: hovered,
+      was_pressed: pressed,
+      activate_on_click,
+    });
+    self.interaction.focused |= focused;
+    self.interaction.hovered |= hovered;
+    self.interaction.pressed |= pressed;
     focused
+  }
+
+  /// Registers a custom pointer hit-test region for this widget's bounds.
+  pub(crate) fn register_pointer(&mut self, id: u64, handler: PointerCallback) {
+    let region = PointerRegion { id, rect: self.rect, handler };
+    pointer::register_region(region.clone());
+    self.events.push(WalkEvent::Pointer(region));
   }
 }
 
@@ -428,6 +522,16 @@ pub mod focus {
 
   fn focus_id(id: &str) {
     STATE.with(|s| s.borrow_mut().synced = Some(id.to_string()));
+    global_events.set_focus(Some(id));
+  }
+
+  /// Focuses the widget with `id` (updating `current` if it is in the Tab order).
+  pub(crate) fn focus_by_id(id: &str) {
+    STATE.with(|s| {
+      let mut s = s.borrow_mut();
+      s.current = s.entries.iter().position(|e| e.0 == id);
+      s.synced = Some(id.to_string());
+    });
     global_events.set_focus(Some(id));
   }
 

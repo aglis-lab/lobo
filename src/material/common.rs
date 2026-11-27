@@ -45,6 +45,20 @@ pub(crate) fn control<H: KeyHandler + Clone + 'static>(
   if enabled { focusable(handler.clone(), Widget::from(body)) } else { Widget::from(body) }
 }
 
+/// Like [`control`], but clicking focuses the widget without firing Enter/activate
+/// (used by `TextField` and `Slider`).
+pub(crate) fn control_no_activate<H: KeyHandler + Clone + 'static>(
+  handler: &H,
+  body: impl Element + 'static,
+  enabled: bool,
+) -> Widget {
+  if enabled {
+    crate::widget::focusable_no_activate(handler.clone(), Widget::from(body))
+  } else {
+    Widget::from(body)
+  }
+}
+
 impl<F: Fn() + 'static> From<F> for Callback {
   fn from(f: F) -> Self {
     Callback(Rc::new(f))

@@ -1,9 +1,9 @@
 //! Text input.
 
 use crate::layout::{Constraints, LayoutCx, PaintCx};
-use crate::material::common::{ValueChanged, control, disabled_fg};
+use crate::material::common::{ValueChanged, control_no_activate, disabled_fg};
 use crate::render::{
-  Border, BoxPaint, Color, IconData, Offset, Rect, Renderer, Size, TextPaint, draw_box, draw_caret,
+  Border, BoxPaint, IconData, Offset, Rect, Renderer, Size, TextPaint, draw_box, draw_caret,
   draw_icon,
 };
 use crate::{Element, EventKey, KeyHandler, Signal, Widget, keys};
@@ -25,12 +25,15 @@ pub enum TextFieldVariant {
 #[non_exhaustive]
 pub struct TextField {
   pub controller: Signal<String>,
-  /// Floating label.
+  /// Label rendered above the input box (shadcn/ui style).
   #[widget(optional)]
   pub label: Option<String>,
-  /// Placeholder while empty.
+  /// Placeholder shown inside the input box while empty.
   #[widget(optional)]
   pub hint: Option<String>,
+  /// Helper / description text rendered below the input box.
+  #[widget(optional)]
+  pub helper_text: Option<String>,
   #[widget(optional)]
   pub prefix_icon: Option<IconData>,
   #[widget(optional)]
@@ -58,28 +61,59 @@ impl TextField {
   }
 }
 
-impl KeyHandler for TextField {
+#[derive(Clone)]
+struct TextFieldHandler {
+  field: TextField,
+  selected_all: Signal<bool>,
+}
+
+impl KeyHandler for TextFieldHandler {
   fn on_key(&self, event: &EventKey) -> bool {
+    if event.modifiers.is_primary() && matches!(event.key, 'a' | 'A') {
+      if !self.field.controller.peek().is_empty() {
+        self.selected_all.set(true);
+      }
+      return true;
+    }
     match event.key {
+      keys::ESCAPE | keys::LEFT | keys::RIGHT => {
+        if self.selected_all.peek() {
+          self.selected_all.set(false);
+          return true;
+        }
+        false
+      }
       keys::ENTER => {
-        if let Some(cb) = &self.on_submitted {
-          cb.call(self.controller.peek());
+        self.selected_all.set(false);
+        if let Some(cb) = &self.field.on_submitted {
+          cb.call(self.field.controller.peek());
         }
         true
       }
       keys::BACKSPACE | keys::DELETE => {
-        let mut text = self.controller.peek();
-        text.pop();
-        self.set(text);
+        if self.selected_all.peek() {
+          self.selected_all.set(false);
+          self.field.set(String::new());
+        } else {
+          let mut text = self.field.controller.peek();
+          text.pop();
+          self.field.set(text);
+        }
         true
       }
-      // Arrows and other special keys are left to other listeners.
+      // Ignore other shortcut combos and non-printable/special keys.
+      _ if event.modifiers.is_primary() || event.modifiers.alt => false,
       k if k.is_control() || ('\u{F700}'..='\u{F8FF}').contains(&k) => false,
       k => {
-        let mut text = self.controller.peek();
-        if self.max_length.is_none_or(|max| text.chars().count() < max) {
+        let mut text = if self.selected_all.peek() {
+          self.selected_all.set(false);
+          String::new()
+        } else {
+          self.field.controller.peek()
+        };
+        if self.field.max_length.is_none_or(|max| text.chars().count() < max) {
           text.push(k);
-          self.set(text);
+          self.field.set(text);
         }
         true
       }
@@ -88,147 +122,171 @@ impl KeyHandler for TextField {
 }
 
 /// The drawn `TextField`; `TextField` wraps it to make it focusable.
-struct TextFieldBody(TextField);
+struct TextFieldBody {
+  field: TextField,
+  selected_all: Signal<bool>,
+}
 
 impl std::ops::Deref for TextFieldBody {
   type Target = TextField;
   fn deref(&self) -> &TextField {
-    &self.0
+    &self.field
   }
 }
 
 impl Element for TextField {
   fn build(&self, _: &crate::Context) -> Option<Widget> {
     let enabled = !self.disabled;
-    Some(control(self, TextFieldBody(self.clone()), enabled))
+    let selected_all = Signal::new(false);
+    let handler = TextFieldHandler { field: self.clone(), selected_all: selected_all.clone() };
+    Some(control_no_activate(
+      &handler,
+      TextFieldBody { field: self.clone(), selected_all },
+      enabled,
+    ))
+  }
+}
+
+impl TextFieldBody {
+  const INPUT_HEIGHT: f32 = 40.0;
+  const LABEL_GAP: f32 = 22.0;
+  const HELPER_GAP: f32 = 22.0;
+
+  fn total_height(&self) -> f32 {
+    let mut h = Self::INPUT_HEIGHT;
+    if self.label.is_some() {
+      h += Self::LABEL_GAP;
+    }
+    if self.helper_text.is_some() {
+      h += Self::HELPER_GAP;
+    }
+    h
   }
 }
 
 impl Element for TextFieldBody {
   fn layout(&self, _cx: &mut LayoutCx, constraints: Constraints) -> Size {
     let w = if constraints.has_bounded_width() { constraints.max_width } else { 280.0 };
-    constraints.constrain(Size::new(w, 56.0))
+    constraints.constrain(Size::new(w, self.total_height()))
   }
 
   fn paint(&self, cx: &mut PaintCx) {
     let t = cx.theme().clone();
     let s = t.color_scheme;
-    // On a coarse grid, the label and text must land on the outline's cells.
-    let r = cx.renderer.snap_rect(cx.rect());
+    let outer = cx.renderer.snap_rect(cx.rect());
     let focused = cx.is_focused();
     // Read with `get` so a change from anywhere repaints the field.
     let text = self.controller.get();
 
-    let accent = if self.disabled {
-      disabled_fg(&t)
-    } else if focused {
-      s.primary
-    } else {
-      s.on_surface_variant
-    };
-    match self.variant {
-      TextFieldVariant::Outlined => {
-        let border = if self.disabled {
-          s.on_surface.with_opacity(0.12)
-        } else if focused {
-          s.primary
-        } else {
-          s.outline
-        };
-        let width = if focused { 2.0 } else { 1.0 };
-        draw_box(
-          &mut cx.renderer,
-          r,
-          &BoxPaint {
-            color: Color::TRANSPARENT,
-            border: Some(Border { color: border, width }),
-            radius: 4.0,
-            elevation: 0.0,
-          },
-        );
-      }
-      TextFieldVariant::Filled => {
-        cx.renderer.fill_rect(r, s.surface_container_highest, 4.0);
-        let y = r.bottom() - if focused { 1.0 } else { 0.5 };
-        cx.renderer.draw_line(
-          Offset::new(r.x, y),
-          Offset::new(r.right(), y),
-          accent,
-          if focused { 2.0 } else { 1.0 },
-        );
-      }
+    // 1. Optional label above the input box.
+    let mut input_y = outer.y;
+    if let Some(label) = &self.label {
+      let label_color = if self.disabled { s.on_surface_variant.with_opacity(0.6) } else { s.on_surface };
+      let label_paint = TextPaint {
+        color: label_color,
+        size: 13.5,
+        bold: true,
+        ..Default::default()
+      };
+      cx.renderer.draw_text(Offset::new(outer.x, outer.y), label, &label_paint);
+      input_y += Self::LABEL_GAP;
     }
 
-    let mut x = r.x + 16.0;
+    let r = Rect::new(outer.x, input_y, outer.width, Self::INPUT_HEIGHT.min(outer.bottom() - input_y).max(0.0));
+
+    // 2. Input box (shadcn/ui rounded-md with crisp 1px border + outer focus ring).
+    let bg = match self.variant {
+      TextFieldVariant::Outlined => {
+        if self.disabled { s.surface_container_low } else { s.surface }
+      }
+      TextFieldVariant::Filled => s.surface_container,
+    };
+    let border_color = if self.disabled { s.outline_variant } else { s.outline };
+    if focused && !self.disabled {
+      cx.renderer.stroke_rect(
+        r.inflate(2.0),
+        Border { color: s.secondary.with_opacity(0.65), width: 2.0 },
+        8.0,
+      );
+    }
+    draw_box(
+      &mut cx.renderer,
+      r,
+      &BoxPaint {
+        color: bg,
+        border: Some(Border { color: border_color, width: 1.0 }),
+        radius: 6.0,
+        elevation: 0.0,
+      },
+    );
+
+    // 3. Optional prefix / suffix icons.
+    let mut x = r.x + 12.0;
     if let Some(icon) = self.prefix_icon {
       draw_icon(
         &mut cx.renderer,
-        Rect::new(r.x + 12.0, r.center().y - 12.0, 24.0, 24.0),
+        Rect::new(r.x + 10.0, r.center().y - 10.0, 20.0, 20.0),
         icon,
         s.on_surface_variant,
       );
-      x = r.x + 52.0;
+      x = r.x + 38.0;
     }
     if let Some(icon) = self.suffix_icon {
       draw_icon(
         &mut cx.renderer,
-        Rect::new(r.right() - 36.0, r.center().y - 12.0, 24.0, 24.0),
+        Rect::new(r.right() - 30.0, r.center().y - 10.0, 20.0, 20.0),
         icon,
         s.on_surface_variant,
       );
     }
 
-    let body = t.text_theme.body_large.clone().resolve(&t);
+    // 4. Value text or placeholder + caret.
+    let body = t.text_theme.body_medium.clone().resolve(&t);
     let line_h = cx.renderer.measure_text("", &body).height;
     let text_y = r.center().y - line_h / 2.0;
-    let floating = focused || !text.is_empty();
-    if let Some(label) = &self.label {
-      if floating {
-        // Small label on the top border (outlined) or inside the top (filled).
-        let paint = TextPaint { color: accent, ..t.text_theme.body_small.clone().resolve(&t) };
-        let ls = cx.renderer.measure_text(label, &paint);
-        let at = match self.variant {
-          TextFieldVariant::Outlined => {
-            let at = Offset::new(r.x + 12.0, r.y - ls.height / 2.0);
-            // Gap in the outline behind the label.
-            cx.renderer.fill_rect(
-              Rect::new(at.x - 4.0, at.y, ls.width + 8.0, ls.height),
-              s.surface,
-              0.0,
-            );
-            Offset::new(at.x, at.y)
-          }
-          TextFieldVariant::Filled => Offset::new(x, r.y + 4.0),
-        };
-        cx.renderer.draw_text(at, label, &paint);
-      } else {
-        let paint = TextPaint {
-          color: if self.disabled { disabled_fg(&t) } else { s.on_surface_variant },
-          ..body.clone()
-        };
-        cx.renderer.draw_text(Offset::new(x, text_y), label, &paint);
-      }
-    }
-
     let shown = if self.obscure_text { "•".repeat(text.chars().count()) } else { text.clone() };
-    let available = (r.right() - x - if self.suffix_icon.is_some() { 44.0 } else { 16.0 }).max(0.0);
-    // Keep the end of long text visible.
-    let mut visible = shown.clone();
+    let available = (r.right() - x - if self.suffix_icon.is_some() { 38.0 } else { 12.0 }).max(0.0);
+    let mut visible = shown;
     while !visible.is_empty() && cx.renderer.measure_text(&visible, &body).width > available {
       visible.remove(0);
     }
+    if !focused {
+      self.selected_all.set(false);
+    }
+    let is_selected_all = focused && !self.disabled && self.selected_all.get() && !visible.is_empty();
     if text.is_empty() {
-      if let (Some(hint), true) = (&self.hint, focused || self.label.is_none()) {
-        let paint = TextPaint { color: s.on_surface_variant, ..body.clone() };
-        cx.renderer.draw_text(Offset::new(x, text_y), hint, &paint);
+      if let Some(hint) = &self.hint {
+        let hint_color =
+          if self.disabled { s.on_surface_variant.with_opacity(0.5) } else { s.on_surface_variant };
+        cx.renderer.draw_text(
+          Offset::new(x, text_y),
+          hint,
+          &TextPaint { color: hint_color, ..body.clone() },
+        );
       }
     } else {
+      if is_selected_all {
+        let sel_w = cx.renderer.measure_text(&visible, &body).width;
+        cx.renderer.fill_rect(
+          Rect::new(x - 1.0, text_y - 1.0, sel_w + 2.0, line_h + 2.0),
+          s.primary.with_opacity(0.18),
+          3.0,
+        );
+      }
       let color = if self.disabled { disabled_fg(&t) } else { s.on_surface };
       cx.renderer.draw_text(Offset::new(x, text_y), &visible, &TextPaint { color, ..body.clone() });
     }
-    if focused {
+    if focused && !self.disabled && !is_selected_all {
       let w = cx.renderer.measure_text(&visible, &body).width;
-      draw_caret(&mut cx.renderer, Offset::new(x + w, text_y), line_h, s.primary);
+      draw_caret(&mut cx.renderer, Offset::new(x + w, text_y), line_h, s.on_surface);
+    }
+
+    // 5. Optional helper text below the input box.
+    if let Some(helper) = &self.helper_text {
+      let helper_color =
+        if self.disabled { s.on_surface_variant.with_opacity(0.55) } else { s.on_surface_variant };
+      let helper_paint = TextPaint { color: helper_color, size: 12.5, ..Default::default() };
+      cx.renderer.draw_text(Offset::new(outer.x, r.bottom() + 6.0), helper, &helper_paint);
     }
   }
 }

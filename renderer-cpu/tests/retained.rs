@@ -18,6 +18,7 @@ fn assert_pixels_equal(actual: &PixmapRenderer, expected: &PixmapRenderer) {
 #[test]
 fn partial_redraw_matches_full_redraw_across_shapes_text_clips_and_overlays() {
   global_events.clear();
+  anim::set_enabled(false);
   let step = Signal::new(0u32);
   let menu_open = Signal::new(false);
 

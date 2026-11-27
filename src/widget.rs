@@ -304,13 +304,22 @@ pub struct Modifiers {
   pub ctrl: bool,
   pub alt: bool,
   pub shift: bool,
+  /// Command (macOS) / Super / Win key.
+  pub meta: bool,
 }
 
 impl Modifiers {
-  pub const NONE: Modifiers = Modifiers { ctrl: false, alt: false, shift: false };
-  pub const CTRL: Modifiers = Modifiers { ctrl: true, alt: false, shift: false };
-  pub const ALT: Modifiers = Modifiers { ctrl: false, alt: true, shift: false };
-  pub const SHIFT: Modifiers = Modifiers { ctrl: false, alt: false, shift: true };
+  pub const NONE: Modifiers = Modifiers { ctrl: false, alt: false, shift: false, meta: false };
+  pub const CTRL: Modifiers = Modifiers { ctrl: true, alt: false, shift: false, meta: false };
+  pub const ALT: Modifiers = Modifiers { ctrl: false, alt: true, shift: false, meta: false };
+  pub const SHIFT: Modifiers = Modifiers { ctrl: false, alt: false, shift: true, meta: false };
+  pub const META: Modifiers = Modifiers { ctrl: false, alt: false, shift: false, meta: true };
+
+  /// `true` for the platform's primary shortcut modifier (Cmd on macOS, Ctrl on Windows/Linux).
+  #[inline]
+  pub const fn is_primary(&self) -> bool {
+    self.ctrl || self.meta
+  }
 }
 
 /// The result of an event dispatch, indicating whether propagation should stop.
@@ -543,6 +552,9 @@ pub struct InputEvent {
   pub focus_id: Option<String>,
   #[widget(optional)]
   pub focusable: bool,
+  /// When `false`, clicking focuses the widget without firing Enter/activate (e.g. `TextField`).
+  #[widget(optional)]
+  pub activate_on_click: Option<bool>,
   #[widget(optional)]
   pub child: Option<Widget>,
 }
@@ -625,7 +637,7 @@ impl Element for InputEvent {
     if self.focusable {
       let id = cx.state::<InputState>().borrow().listener.as_ref().and_then(|l| l.id.clone());
       if let Some(id) = id {
-        cx.register_focus(&id);
+        cx.register_focus(&id, self.activate_on_click.unwrap_or(true));
       }
     }
     cx.paint_children();
@@ -658,6 +670,22 @@ impl<F: Fn(&EventKey) -> bool> KeyHandler for F {
 
 /// `child` in the Tab order, with `handler` receiving its keys while focused.
 pub fn focusable(handler: impl KeyHandler + 'static, child: impl Into<Widget>) -> Widget {
+  focusable_opts(handler, child, true)
+}
+
+/// Like [`focusable`], but clicking focuses the widget without firing Enter/activate.
+pub(crate) fn focusable_no_activate(
+  handler: impl KeyHandler + 'static,
+  child: impl Into<Widget>,
+) -> Widget {
+  focusable_opts(handler, child, false)
+}
+
+fn focusable_opts(
+  handler: impl KeyHandler + 'static,
+  child: impl Into<Widget>,
+  activate_on_click: bool,
+) -> Widget {
   let handler = Rc::new(handler);
   Widget::from(InputEvent {
     event: Rc::new(move |e: &EventKey| {
@@ -667,6 +695,7 @@ pub fn focusable(handler: impl KeyHandler + 'static, child: impl Into<Widget>) -
     }),
     focus_id: None,
     focusable: true,
+    activate_on_click: Some(activate_on_click),
     child: Some(child.into()),
   })
 }

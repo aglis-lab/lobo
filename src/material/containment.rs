@@ -2,7 +2,7 @@
 
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::common::{Callback, disabled_fg, focus_on_open, pressable, styled};
-use crate::render::{Border, BoxPaint, Color, Offset, Rect, Renderer, Size, draw_box, draw_focus};
+use crate::render::{Border, BoxPaint, Color, Offset, Rect, Renderer, Size, draw_box};
 use crate::theme::ThemeData;
 use crate::{
   Center, Column, CrossAxisAlignment, Element, Icon, MainAxisAlignment, MainAxisSize, Padding, Row,
@@ -84,7 +84,7 @@ impl Element for AlertDialog {
   fn paint(&self, cx: &mut PaintCx) {
     let scheme = cx.theme().color_scheme;
     let rect = cx.rect();
-    cx.renderer.fill_rect(rect, scheme.scrim.with_opacity(0.32), 0.0);
+    cx.renderer.fill_rect(rect, scheme.scrim.with_opacity(0.5), 0.0);
     // Same geometry as `layout`: the child sits 24 px inside a centered panel.
     let child = cx.child_rect(0);
     let width = (rect.width - 96.0).clamp(280.0, 560.0);
@@ -94,9 +94,9 @@ impl Element for AlertDialog {
       &mut cx.renderer,
       panel,
       &BoxPaint {
-        color: scheme.surface_container_high,
-        border: None,
-        radius: 28.0,
+        color: scheme.surface,
+        border: Some(Border { color: scheme.outline_variant, width: 1.0 }),
+        radius: 8.0,
         elevation: 3.0,
       },
     );
@@ -209,16 +209,22 @@ impl Element for Card {
     let m = self.margin();
     let rect = cx.rect().deflate(m.left, m.top, m.right, m.bottom);
     let paint = match self.variant {
-      CardVariant::Elevated => {
-        BoxPaint { color: s.surface_container_low, border: None, radius: 12.0, elevation: 1.0 }
-      }
-      CardVariant::Filled => {
-        BoxPaint { color: s.surface_container_highest, border: None, radius: 12.0, elevation: 0.0 }
-      }
+      CardVariant::Elevated => BoxPaint {
+        color: s.surface,
+        border: Some(Border { color: s.outline_variant, width: 1.0 }),
+        radius: 8.0,
+        elevation: 1.0,
+      },
+      CardVariant::Filled => BoxPaint {
+        color: s.surface_container,
+        border: Some(Border { color: s.outline_variant, width: 1.0 }),
+        radius: 8.0,
+        elevation: 0.0,
+      },
       CardVariant::Outlined => BoxPaint {
         color: s.surface,
         border: Some(Border { color: s.outline_variant, width: 1.0 }),
-        radius: 12.0,
+        radius: 8.0,
         elevation: 0.0,
       },
     };
@@ -320,18 +326,6 @@ pub struct ListTile {
   pub selected: bool,
   #[widget(optional)]
   pub disabled: bool,
-}
-
-impl ListTile {
-  fn fg(&self, t: &ThemeData, normal: Color) -> Color {
-    if self.disabled {
-      disabled_fg(t)
-    } else if self.selected {
-      t.color_scheme.primary
-    } else {
-      normal
-    }
-  }
 }
 
 /// The laid-out tile; `ListTile` wraps it to make it focusable.
@@ -442,16 +436,14 @@ impl Element for ListTileBody {
   }
 
   fn paint(&self, cx: &mut PaintCx) {
-    if self.selected && !self.disabled {
-      let color = self.fg(cx.theme(), Color::TRANSPARENT).with_opacity(0.08);
-      let rect = cx.rect();
-      cx.renderer.fill_rect(rect, color, 0.0);
+    let s = cx.theme().color_scheme;
+    let rect = cx.rect();
+    let inset = rect.deflate(6.0, 2.0, 6.0, 2.0);
+    if (self.selected || cx.is_focused()) && !self.disabled {
+      cx.renderer.fill_rect(inset, s.secondary_container, 6.0);
+    } else if cx.is_hovered() && !self.disabled {
+      cx.renderer.fill_rect(inset, s.secondary_container.with_opacity(0.55), 6.0);
     }
     cx.paint_children();
-    if cx.is_focused() {
-      let color = cx.theme().color_scheme.secondary;
-      let rect = cx.rect();
-      draw_focus(&mut cx.renderer, rect.inflate(-2.0), color, 0.0);
-    }
   }
 }

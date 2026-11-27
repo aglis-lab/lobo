@@ -13,7 +13,7 @@ pub use cmd::{DisplayList, DrawCmd, Item, LayerId};
 pub use geometry::{HD_720, Offset, Rect, Size};
 pub use paint::{Border, BoxPaint, Color, IconData, TextPaint, ToggleColors, TrackColors};
 pub use recorder::Recorder;
-pub use scene::Scene;
+pub use scene::{Scene, SceneTimings};
 
 /// The one interface through which all text and widgets are drawn.
 ///

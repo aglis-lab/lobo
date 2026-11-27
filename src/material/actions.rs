@@ -78,6 +78,19 @@ impl Element for ButtonBox {
         elevation: look.elevation,
       },
     );
+    if self.on_pressed.is_some() {
+      let target_alpha = if cx.is_pressed() {
+        0.16
+      } else if cx.is_hovered() {
+        0.08
+      } else {
+        0.0
+      };
+      let alpha = cx.animate_f32(target_alpha, 120.0, crate::Curve::EaseOut);
+      if alpha > 0.005 {
+        cx.renderer.fill_rect(rect, look.fg.with_opacity(alpha), self.radius);
+      }
+    }
     cx.paint_children();
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
@@ -108,9 +121,12 @@ fn button_look(kind: ButtonKind) -> LookFn {
       return ButtonLook { bg, fg: disabled_fg(t), border, elevation: 0.0 };
     }
     match kind {
-      ButtonKind::Elevated => {
-        ButtonLook { bg: s.surface_container_low, fg: s.primary, border: None, elevation: 1.0 }
-      }
+      ButtonKind::Elevated => ButtonLook {
+        bg: s.surface,
+        fg: s.on_surface,
+        border: Some(Border { color: s.outline_variant, width: 1.0 }),
+        elevation: 1.0,
+      },
       ButtonKind::Filled => {
         ButtonLook { bg: s.primary, fg: s.on_primary, border: None, elevation: 0.0 }
       }
@@ -121,13 +137,13 @@ fn button_look(kind: ButtonKind) -> LookFn {
         elevation: 0.0,
       },
       ButtonKind::Outlined => ButtonLook {
-        bg: Color::TRANSPARENT,
-        fg: s.primary,
-        border: Some(Border { color: s.outline, width: 1.0 }),
+        bg: s.surface,
+        fg: s.on_surface,
+        border: Some(Border { color: s.outline_variant, width: 1.0 }),
         elevation: 0.0,
       },
       ButtonKind::Text => {
-        ButtonLook { bg: Color::TRANSPARENT, fg: s.primary, border: None, elevation: 0.0 }
+        ButtonLook { bg: Color::TRANSPARENT, fg: s.on_surface, border: None, elevation: 0.0 }
       }
     }
   })
@@ -157,8 +173,8 @@ fn common_button(
     on_pressed,
     look: button_look(kind),
     padding,
-    min: Size::new(64.0, 40.0),
-    radius: 20.0,
+    min: Size::new(64.0, 38.0),
+    radius: 6.0,
   })
 }
 
@@ -322,8 +338,8 @@ impl Element for IconButton {
       on_pressed: self.on_pressed.clone(),
       look,
       padding: Padding::all(8.0),
-      min: Size::new(40.0, 40.0),
-      radius: 20.0,
+      min: Size::new(38.0, 38.0),
+      radius: 6.0,
     }))
   }
 }
@@ -364,10 +380,10 @@ impl Element for FloatingActionButton {
       let s = &t.color_scheme;
       if enabled {
         ButtonLook {
-          bg: s.primary_container,
-          fg: s.on_primary_container,
+          bg: s.primary,
+          fg: s.on_primary,
           border: None,
-          elevation: 3.0,
+          elevation: 2.0,
         }
       } else {
         ButtonLook { bg: disabled_bg(t), fg: disabled_fg(t), border: None, elevation: 0.0 }
@@ -381,14 +397,14 @@ impl Element for FloatingActionButton {
           children: [self.child.clone(), label.clone()]
         }),
         Padding::symmetric(16.0, 0.0),
-        Size::new(80.0, 56.0),
-        16.0,
+        Size::new(80.0, 48.0),
+        8.0,
       ),
       None => {
         let (side, radius) = match self.size {
-          FabSize::Small => (40.0, 12.0),
-          FabSize::Regular => (56.0, 16.0),
-          FabSize::Large => (96.0, 28.0),
+          FabSize::Small => (40.0, 6.0),
+          FabSize::Regular => (52.0, 8.0),
+          FabSize::Large => (72.0, 12.0),
         };
         (self.child.clone(), Padding::ZERO, Size::new(side, side), radius)
       }

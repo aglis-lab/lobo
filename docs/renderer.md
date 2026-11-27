@@ -65,7 +65,7 @@ renderer          the trait, geometry, paint types.        no heavy deps
 | Crate | Contents | Dependencies |
 |---|---|---|
 | `renderer` | `Renderer`, `Offset/Size/Rect`, `Color`, `TextPaint`, `BoxPaint`, `DrawCmd`, `Recorder`, `Scene` | none |
-| `renderer-cpu` | `PixmapRenderer` (RGBA buffer via `vello_cpu` + built-in 5×7 glyph renderer); interactive `winit` + `softbuffer` gallery example (`--png` for headless export) | `renderer`, `vello_cpu` |
+| `renderer-cpu` | `PixmapRenderer` (RGBA buffer via `vello_cpu` + `parley` text shaping/layout with system fonts); interactive `winit` + `softbuffer` gallery example (`--png` for headless export) | `renderer`, `vello_cpu`, `parley` |
 | `renderer-gpu` | `wgpu` backend drawing into a surface or texture (placeholder, not yet implemented) | `renderer` |
 | `lobo` | widgets, layout, state, retained tree; re-exports `renderer` | `renderer` only |
 

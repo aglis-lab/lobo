@@ -5,7 +5,7 @@ use crate::material::actions::{ButtonBox, ButtonLook, label};
 use crate::material::common::Callback;
 use crate::render::{
   BoxPaint, Color, Offset, Rect, Renderer, Size, TextPaint, TrackColors, draw_box,
-  draw_circular_progress, draw_linear_progress,
+  draw_circular_progress_at, draw_linear_progress_at,
 };
 use crate::theme::ThemeData;
 use crate::{Element, MainAxisSize, Padding, Row, Spacer, Widget, ui};
@@ -79,11 +79,17 @@ impl Element for LinearProgressIndicator {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = track_colors(cx.theme());
     let rect = cx.rect();
-    draw_linear_progress(&mut cx.renderer, rect, self.value, &colors);
+    let phase = if self.value.is_none() {
+      cx.request_repaint();
+      cx.state::<crate::LoopingPhase>().borrow().sample(1400.0)
+    } else {
+      0.0
+    };
+    draw_linear_progress_at(&mut cx.renderer, rect, self.value, phase, &colors);
   }
 }
 
-/// Circular progress ring (48x48). `value` unset means indeterminate.
+/// Circular progress ring (48x48). `value` unset means indeterminate (animated).
 #[derive(Widget)]
 #[non_exhaustive]
 pub struct CircularProgressIndicator {
@@ -99,7 +105,69 @@ impl Element for CircularProgressIndicator {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = track_colors(cx.theme());
     let rect = cx.rect();
-    draw_circular_progress(&mut cx.renderer, rect, self.value, &colors);
+    let phase = if self.value.is_none() {
+      cx.request_repaint();
+      cx.state::<crate::LoopingPhase>().borrow().sample(1100.0)
+    } else {
+      0.0
+    };
+    draw_circular_progress_at(&mut cx.renderer, rect, self.value, phase, &colors);
+  }
+}
+
+/// Infinite spinning loader (shadcn/ui `Spinner` / `Loader2` style).
+#[derive(Widget)]
+#[non_exhaustive]
+pub struct Spinner {
+  /// Diameter in logical pixels (defaults to `24.0`).
+  #[widget(optional)]
+  pub size: f32,
+  /// Stroke thickness in logical pixels (defaults to `2.5`).
+  #[widget(optional)]
+  pub stroke_width: f32,
+  /// Optional color override (defaults to `theme.color_scheme.primary`).
+  #[widget(optional)]
+  pub color: Option<Color>,
+  /// Full rotation duration in milliseconds (defaults to `800.0`).
+  #[widget(optional)]
+  pub period_ms: f32,
+}
+
+impl Element for Spinner {
+  fn layout(&self, _cx: &mut LayoutCx, constraints: Constraints) -> Size {
+    let s = if self.size > 0.0 { self.size } else { 24.0 };
+    constraints.constrain(Size::new(s, s))
+  }
+
+  fn paint(&self, cx: &mut PaintCx) {
+    let rect = cx.rect();
+    let color = self.color.unwrap_or(cx.theme().color_scheme.primary);
+    let stroke = if self.stroke_width > 0.0 { self.stroke_width } else { 2.5 };
+    let period = if self.period_ms > 0.0 { self.period_ms } else { 800.0 };
+
+    cx.request_repaint();
+    let phase = cx.state::<crate::LoopingPhase>().borrow().sample(period);
+
+    let c = rect.center();
+    let radius = (rect.width.min(rect.height) * 0.5 - stroke * 0.5).max(1.0);
+    // Faint background ring
+    cx.renderer.stroke_circle(
+      c,
+      radius,
+      crate::render::Border { color: color.with_opacity(0.18), width: stroke },
+    );
+    // Smooth 270-degree rotating arc
+    let sweep = 0.72f32;
+    let steps = 28usize;
+    let point = |t: f32| {
+      let a = (phase + t) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+      Offset::new(c.x + radius * a.cos(), c.y + radius * a.sin())
+    };
+    for i in 0..steps {
+      let t0 = sweep * i as f32 / steps as f32;
+      let t1 = sweep * (i + 1) as f32 / steps as f32;
+      cx.renderer.draw_line(point(t0), point(t1), color, stroke);
+    }
   }
 }
 

@@ -1,15 +1,4 @@
-use std::num::NonZeroU32;
-use std::rc::Rc;
-
 use lobo::*;
-use renderer_cpu::PixmapRenderer;
-use softbuffer::{Context as SbContext, Surface};
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
 
 #[derive(Clone)]
 struct GalleryState {
@@ -27,6 +16,11 @@ struct GalleryState {
   list_idx: Signal<usize>,
   menu_open: Signal<bool>,
   dialog_open: Signal<bool>,
+  anim_toggled: Signal<bool>,
+  anim_loop: Signal<bool>,
+  spring_toggled: Signal<bool>,
+  spring_loop: Signal<bool>,
+  max_fps: Signal<u32>,
   status: Signal<String>,
 }
 
@@ -47,8 +41,98 @@ impl Default for GalleryState {
       list_idx: Signal::new(0),
       menu_open: Signal::new(false),
       dialog_open: Signal::new(false),
-      status: Signal::new(String::from("Tab/Shift-Tab: focus | Enter/Space: activate")),
+      anim_toggled: Signal::new(false),
+      anim_loop: Signal::new(false),
+      spring_toggled: Signal::new(false),
+      spring_loop: Signal::new(false),
+      max_fps: Signal::new(60),
+      status: Signal::new(String::from("Tab: focus | F3: perf HUD | F4: damage flash")),
     }
+  }
+}
+
+/// Demo widget: declaratively animates a bar with a chosen easing `Curve` over 700 ms.
+#[derive(Widget)]
+struct CurveBar {
+  label: &'static str,
+  target: f32,
+  curve: Curve,
+  color: Color,
+  #[widget(optional)]
+  loop_forever: bool,
+}
+
+impl Element for CurveBar {
+  fn build(&self, context: &Context) -> Option<Widget> {
+    let track_bg = ThemeData::of(context).color_scheme.secondary_container;
+    let label = self.label;
+    let color = self.color;
+    Some(ui!(AnimatedValue {
+      target: self.target,
+      duration_ms: 700.0,
+      curve: self.curve,
+      repeat: self.loop_forever,
+      builder: move |t: f32| {
+        let track_w = 240.0;
+        let fill_w = (track_w * (0.08 + 0.92 * t.clamp(0.0, 1.15))).clamp(12.0, track_w);
+        ui!(Row {
+          spacing: 12.0,
+          cross_axis_alignment: CrossAxisAlignment::Center,
+          children: [
+            SizedBox { width: 100.0, child: Text { text: label, style: TextStyle { size: 12.5 } } },
+            Stack {
+              children: [
+                Container { width: track_w, height: 12.0, color: track_bg, radius: 6.0 },
+                Container { width: fill_w, height: 12.0, color, radius: 6.0 },
+              ],
+            },
+          ],
+        })
+      },
+    }))
+  }
+}
+
+/// Demo widget: declaratively animates a physics-based `Spring` puck across a track.
+#[derive(Widget)]
+struct SpringTrack {
+  target: f32,
+  #[widget(optional)]
+  loop_forever: bool,
+}
+
+impl Element for SpringTrack {
+  fn build(&self, context: &Context) -> Option<Widget> {
+    let scheme = ThemeData::of(context).color_scheme;
+    let track_bg = scheme.secondary_container;
+    let puck_bg = scheme.primary;
+    Some(ui!(AnimatedSpring {
+      target: self.target,
+      repeat: self.loop_forever,
+      builder: move |pos: f32| {
+        let track_w = 340.0;
+        let puck_w = 48.0;
+        let x = ((track_w - puck_w) * pos).clamp(0.0, track_w - puck_w);
+        ui!(SizedBox {
+          width: track_w,
+          height: 44.0,
+          child: Stack {
+            children: [
+              Positioned {
+                left: 0.0,
+                top: 17.0,
+                child: Container { width: track_w, height: 10.0, color: track_bg, radius: 5.0 },
+              },
+              Positioned {
+                left: x,
+                top: 6.0,
+                child: Container { width: puck_w, height: 32.0, color: puck_bg, radius: 8.0 },
+              },
+            ],
+          },
+        })
+      },
+    }))
   }
 }
 
@@ -209,12 +293,20 @@ impl Gallery {
               spacing: 16.0,
               main_axis_size: MainAxisSize::Min,
               children: [
-                Text { text: "Text Inputs" },
-                TextField { controller: s.name.clone(), label: "Project name" },
+                Text { text: "Inputs (shadcn/ui)" },
                 TextField {
-                  controller: s.note.clone(),
-                  variant: TextFieldVariant::Filled,
-                  label: "Notes",
+                  controller: s.name.clone(),
+                  label: "Email",
+                  hint: "Email",
+                  helper_text: "Enter your email address",
+                },
+                TextField { controller: s.note.clone(), label: "Notes", hint: "Add value" },
+                TextField {
+                  controller: Signal::new(String::new()),
+                  label: "Disabled",
+                  hint: "Email",
+                  helper_text: "Enter your email address",
+                  disabled: true,
                 },
               ],
             },
@@ -273,6 +365,149 @@ impl Gallery {
       ],
     })
   }
+  fn animations_page(&self) -> Widget {
+    let s = &self.state;
+    let t_curves = if s.anim_toggled.get() { 1.0 } else { 0.0 };
+    let anim_loop = s.anim_loop.get();
+    let t_spring = if s.spring_toggled.get() { 1.0 } else { 0.0 };
+    let spring_loop = s.spring_loop.get();
+    let anim_sig = s.anim_toggled.clone();
+    let anim_loop_sig = s.anim_loop.clone();
+    let spring_sig = s.spring_toggled.clone();
+    let spring_loop_sig = s.spring_loop.clone();
+    let cap_fps = s.max_fps.get();
+    let fps_chip = |label: &'static str, target: u32| {
+      let sig = s.max_fps.clone();
+      ui!(ChoiceChip { label, selected: cap_fps == target, on_selected: move |_| sig.set(target) })
+    };
+
+    ui!(Grid {
+      columns: 2,
+      gap: 20.0,
+      children: [
+        Card {
+          variant: CardVariant::Outlined,
+          child: Container {
+            padding: Padding::all(16.0),
+            child: Column {
+              spacing: 10.0,
+              main_axis_size: MainAxisSize::Min,
+              cross_axis_alignment: CrossAxisAlignment::Start,
+              children: [
+                Row {
+                  spacing: 12.0,
+                  cross_axis_alignment: CrossAxisAlignment::Center,
+                  children: [
+                    Text { text: "Easing Curves (700 ms)" },
+                    FilledButton {
+                      on_pressed: move || anim_sig.set(!anim_sig.peek()),
+                      child: Text { text: "Animate" },
+                    },
+                    Checkbox { value: anim_loop, on_changed: move |v: bool| anim_loop_sig.set(v) },
+                    Text { text: "Infinite" },
+                  ],
+                },
+                CurveBar {
+                  label: "Linear",
+                  target: t_curves,
+                  curve: Curve::Linear,
+                  color: Color::hex(0x3B82F6),
+                  loop_forever: anim_loop
+                },
+                CurveBar {
+                  label: "EaseIn",
+                  target: t_curves,
+                  curve: Curve::EaseIn,
+                  color: Color::hex(0x8B5CF6),
+                  loop_forever: anim_loop
+                },
+                CurveBar {
+                  label: "EaseOut",
+                  target: t_curves,
+                  curve: Curve::EaseOut,
+                  color: Color::hex(0x10B981),
+                  loop_forever: anim_loop
+                },
+                CurveBar {
+                  label: "EaseInOut",
+                  target: t_curves,
+                  curve: Curve::EaseInOut,
+                  color: Color::hex(0xF59E0B),
+                  loop_forever: anim_loop
+                },
+                CurveBar {
+                  label: "FastOutSlowIn",
+                  target: t_curves,
+                  curve: Curve::FastOutSlowIn,
+                  color: Color::hex(0xEF4444),
+                  loop_forever: anim_loop
+                },
+                CurveBar {
+                  label: "CubicBezier",
+                  target: t_curves,
+                  curve: Curve::CubicBezier(0.34, 1.4, 0.64, 1.0),
+                  color: Color::hex(0xEC4899),
+                  loop_forever: anim_loop,
+                },
+              ],
+            },
+          },
+        },
+        Card {
+          variant: CardVariant::Outlined,
+          child: Container {
+            padding: Padding::all(16.0),
+            child: Column {
+              spacing: 16.0,
+              main_axis_size: MainAxisSize::Min,
+              cross_axis_alignment: CrossAxisAlignment::Start,
+              children: [
+                Row {
+                  spacing: 12.0,
+                  cross_axis_alignment: CrossAxisAlignment::Center,
+                  children: [
+                    Text { text: "Physics Spring" },
+                    OutlinedButton {
+                      on_pressed: move || spring_sig.set(!spring_sig.peek()),
+                      child: Text { text: "Bounce" },
+                    },
+                    Checkbox {
+                      value: spring_loop,
+                      on_changed: move |v: bool| spring_loop_sig.set(v),
+                    },
+                    Text { text: "Infinite" },
+                  ],
+                },
+                SpringTrack { target: t_spring, loop_forever: spring_loop },
+                Text { text: "Infinite Spinners & Indeterminate Progress" },
+                Row {
+                  spacing: 16.0,
+                  cross_axis_alignment: CrossAxisAlignment::Center,
+                  children: [
+                    Spinner { size: 18.0, stroke_width: 2.0 },
+                    Spinner { size: 28.0 },
+                    Spinner { size: 38.0, stroke_width: 3.5, period_ms: 1000.0 },
+                    CircularProgressIndicator {},
+                  ],
+                },
+                LinearProgressIndicator {},
+                Row {
+                  spacing: 8.0,
+                  cross_axis_alignment: CrossAxisAlignment::Center,
+                  children: [
+                    Text { text: "FPS Cap:" },
+                    fps_chip("Auto", 0),
+                    fps_chip("60", 60),
+                    fps_chip("30", 30),
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    })
+  }
 }
 
 impl Element for Gallery {
@@ -291,7 +526,8 @@ impl Element for Gallery {
     let body = match tab {
       0 => self.controls_page(),
       1 => self.inputs_page(),
-      _ => self.overlays_page(),
+      2 => self.overlays_page(),
+      _ => self.animations_page(),
     };
 
     let scaffold = ui!(Scaffold {
@@ -317,6 +553,7 @@ impl Element for Gallery {
           NavigationDestination { icon: Icons::WIDGETS, label: "Controls" },
           NavigationDestination { icon: Icons::EDIT, label: "Inputs" },
           NavigationDestination { icon: Icons::MENU, label: "Overlays" },
+          NavigationDestination { icon: Icons::PLAY_ARROW, label: "Animations" },
         ],
       },
       body: Container { padding: Padding::all(24.0), child: body },
@@ -340,206 +577,33 @@ impl Element for Gallery {
       scaffold
     };
 
-    let theme = if dark { ThemeData::dark() } else { ThemeData::light() };
-    Some(ui!(Theme { data: theme, child: root }))
+    let max_fps = s.max_fps.get();
+    Some(ui!(App {
+      title: "Lobo Material Gallery",
+      theme: ThemeData::light(),
+      dark_theme: ThemeData::dark(),
+      theme_mode: if dark { ThemeMode::Dark } else { ThemeMode::Light },
+      perf_monitor: true,
+      max_fps,
+      home: root,
+    }))
   }
-}
-
-struct GuiApp {
-  window: Option<Rc<Window>>,
-  _sb_context: Option<SbContext<winit::event_loop::OwnedDisplayHandle>>,
-  surface: Option<Surface<winit::event_loop::OwnedDisplayHandle, Rc<Window>>>,
-  surface_size: Option<(u32, u32)>,
-  renderer: PixmapRenderer,
-  scene: Scene,
-  root: Rc<Node>,
-  modifiers: ModifiersState,
-  needs_present: bool,
-}
-
-impl GuiApp {
-  fn new(root: Rc<Node>) -> Self {
-    GuiApp {
-      window: None,
-      _sb_context: None,
-      surface: None,
-      surface_size: None,
-      renderer: PixmapRenderer::hd720(),
-      scene: Scene::new(),
-      root,
-      modifiers: ModifiersState::empty(),
-      needs_present: true,
-    }
-  }
-
-  fn sync_size(&mut self) {
-    let Some(window) = &self.window else { return };
-    let phys = window.inner_size();
-    if phys.width == 0 || phys.height == 0 {
-      return;
-    }
-    let scale = window.scale_factor() as f32;
-    let logical_w = (phys.width as f32 / scale).max(1.0);
-    let logical_h = (phys.height as f32 / scale).max(1.0);
-    if self.renderer.resize_with_scale(logical_w, logical_h, scale) {
-      self.scene.invalidate();
-      self.needs_present = true;
-    }
-    let target = (u32::from(self.renderer.width()), u32::from(self.renderer.height()));
-    if self.surface_size != Some(target) {
-      self.needs_present = true;
-    }
-  }
-
-  fn present_surface(&mut self) {
-    let (Some(surface), Some(window)) = (&mut self.surface, &self.window) else { return };
-    let w = NonZeroU32::new(u32::from(self.renderer.width()));
-    let h = NonZeroU32::new(u32::from(self.renderer.height()));
-    let (Some(w), Some(h)) = (w, h) else { return };
-    let target = (w.get(), h.get());
-    if self.surface_size != Some(target) {
-      if let Err(err) = surface.resize(w, h) {
-        eprintln!("softbuffer resize failed: {err}");
-        return;
-      }
-      self.surface_size = Some(target);
-    }
-    match surface.buffer_mut() {
-      Ok(mut buffer) => {
-        for (dst, px) in buffer.iter_mut().zip(self.renderer.pixmap().data()) {
-          *dst = (u32::from(px.r) << 16) | (u32::from(px.g) << 8) | u32::from(px.b);
-        }
-        window.pre_present_notify();
-        if let Err(err) = buffer.present() {
-          eprintln!("softbuffer present failed: {err}");
-        }
-      }
-      Err(err) => eprintln!("softbuffer buffer_mut failed: {err}"),
-    }
-  }
-}
-
-impl ApplicationHandler<()> for GuiApp {
-  fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-    if self.window.is_some() {
-      return;
-    }
-    let attrs = Window::default_attributes()
-      .with_title("Lobo Material Gallery (CPU)")
-      .with_inner_size(LogicalSize::new(1280.0, 720.0));
-    let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
-    let sb_ctx = SbContext::new(event_loop.owned_display_handle()).expect("softbuffer context");
-    let surface = Surface::new(&sb_ctx, window.clone()).expect("softbuffer surface");
-    self.window = Some(window.clone());
-    self._sb_context = Some(sb_ctx);
-    self.surface = Some(surface);
-    self.sync_size();
-    window.request_redraw();
-  }
-
-  fn user_event(&mut self, _event_loop: &ActiveEventLoop, _: ()) {
-    if let Some(window) = &self.window {
-      window.request_redraw();
-    }
-  }
-
-  fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-    match event {
-      WindowEvent::CloseRequested => event_loop.exit(),
-      WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-        self.sync_size();
-        if let Some(window) = &self.window {
-          window.request_redraw();
-        }
-      }
-      WindowEvent::ModifiersChanged(mods) => {
-        self.modifiers = mods.state();
-      }
-      WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-        if is_quit(&event, self.modifiers) {
-          event_loop.exit();
-          return;
-        }
-        if let Some(key) = map_winit_key(&event, self.modifiers) {
-          dispatch_event(&key);
-          self.root.update();
-          if let Some(window) = &self.window {
-            window.request_redraw();
-          }
-        }
-      }
-      WindowEvent::RedrawRequested => {
-        self.root.update();
-        let dmg = self.root.present(&mut self.scene, &mut self.renderer);
-        if dmg.is_some() || self.needs_present {
-          self.present_surface();
-          self.needs_present = false;
-        }
-      }
-      _ => {}
-    }
-  }
-}
-
-fn is_quit(event: &KeyEvent, mods: ModifiersState) -> bool {
-  let Key::Character(ref s) = event.logical_key else { return false };
-  let ch = s.chars().next();
-  (mods.super_key() && matches!(ch, Some('q' | 'Q')))
-    || (mods.control_key() && matches!(ch, Some('c' | 'C' | 'q' | 'Q')))
-}
-
-fn map_winit_key(event: &KeyEvent, mods: ModifiersState) -> Option<EventKey> {
-  let m = Modifiers { ctrl: mods.control_key(), alt: mods.alt_key(), shift: mods.shift_key() };
-  let ch = match &event.logical_key {
-    Key::Named(NamedKey::Tab) => {
-      return Some(EventKey::with_modifiers(
-        if mods.shift_key() { keys::BACK_TAB } else { keys::TAB },
-        Modifiers { shift: false, ..m },
-      ));
-    }
-    Key::Named(NamedKey::Enter) => keys::ENTER,
-    Key::Named(NamedKey::Escape) => keys::ESCAPE,
-    Key::Named(NamedKey::Backspace) => keys::BACKSPACE,
-    Key::Named(NamedKey::Delete) => keys::DELETE,
-    Key::Named(NamedKey::ArrowUp) => keys::UP,
-    Key::Named(NamedKey::ArrowDown) => keys::DOWN,
-    Key::Named(NamedKey::ArrowLeft) => keys::LEFT,
-    Key::Named(NamedKey::ArrowRight) => keys::RIGHT,
-    Key::Named(NamedKey::Space) => ' ',
-    Key::Character(s) => {
-      let c = s.chars().next()?;
-      if c.is_control() {
-        return None;
-      }
-      c
-    }
-    _ => return None,
-  };
-  Some(EventKey::with_modifiers(ch, m))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let state = GalleryState::default();
   let mut args = std::env::args().skip(1);
   if args.next().as_deref() == Some("--png") {
     let out_path = args.next().unwrap_or_else(|| "/tmp/lobo-gallery.png".to_string());
-    let mut renderer = PixmapRenderer::hd720();
-    let mut scene = Scene::new();
-    let root = Node::mount(ui!(Gallery { state: GalleryState::default() }), Context::default());
-    root.present(&mut scene, &mut renderer);
-    std::fs::write(&out_path, renderer.to_png()?)?;
-    println!("rendered {}x{} gallery to {out_path}", renderer.width(), renderer.height());
+    if let Some(tab_arg) = args.next()
+      && let Ok(tab) = tab_arg.parse::<usize>()
+    {
+      state.tab.set(tab);
+    }
+    let png = App::render_png(ui!(Gallery { state }), 1280, 720)?;
+    std::fs::write(&out_path, png)?;
+    println!("rendered 1280x720 gallery to {out_path}");
     return Ok(());
   }
-
-  let event_loop = EventLoop::<()>::with_user_event().build()?;
-  let proxy = event_loop.create_proxy();
-  set_redraw_waker(Some(Rc::new(move || {
-    let _ = proxy.send_event(());
-  })));
-
-  let root = Node::mount(ui!(Gallery { state: GalleryState::default() }), Context::default());
-  let mut app = GuiApp::new(root);
-  event_loop.run_app(&mut app)?;
-  set_redraw_waker(None);
-  Ok(())
+  run_app(ui!(Gallery { state }))
 }

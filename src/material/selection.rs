@@ -6,14 +6,14 @@
 
 use crate::layout::{Constraints, LayoutCx, PaintCx};
 use crate::material::common::{
-  Callback, ValueChanged, control, disabled_fg, focus_on_open, pressable,
+  Callback, ValueChanged, control, control_no_activate, disabled_fg, focus_on_open, pressable,
 };
 use crate::render::{
   Border, BoxPaint, Color, IconData, Offset, Rect, Renderer, Size, TextPaint, ToggleColors,
   TrackColors, draw_box, draw_checkbox, draw_focus, draw_icon, draw_radio, draw_slider,
-  draw_switch,
+  draw_switch_at,
 };
-use crate::theme::{TextStyle, ThemeData};
+use crate::theme::ThemeData;
 use crate::{Element, EventKey, Icons, KeyHandler, Widget, keys};
 
 fn toggle_colors(t: &ThemeData, enabled: bool) -> ToggleColors {
@@ -90,7 +90,7 @@ impl Element for CheckboxBody {
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      draw_focus(&mut cx.renderer, rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 6.0);
     }
   }
 }
@@ -148,7 +148,7 @@ impl Element for RadioBody {
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      draw_focus(&mut cx.renderer, rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 6.0);
     }
   }
 }
@@ -199,11 +199,12 @@ impl Element for SwitchBody {
   fn paint(&self, cx: &mut PaintCx) {
     let colors = toggle_colors(cx.theme(), self.on_changed.is_some());
     let rect = cx.rect();
-    draw_switch(&mut cx.renderer, rect, self.value, &colors);
+    let t = cx.animate_f32(if self.value { 1.0 } else { 0.0 }, 160.0, crate::Curve::FastOutSlowIn);
+    draw_switch_at(&mut cx.renderer, rect, t, &colors);
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      draw_focus(&mut cx.renderer, rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 6.0);
     }
   }
 }
@@ -275,10 +276,16 @@ impl std::ops::Deref for SliderBody {
   }
 }
 
+#[derive(Default)]
+struct SliderPointerState {
+  region_id: Option<u64>,
+  dragging: bool,
+}
+
 impl Element for Slider {
   fn build(&self, _: &crate::Context) -> Option<Widget> {
     let enabled = self.on_changed.is_some();
-    Some(control(self, SliderBody(self.clone()), enabled))
+    Some(control_no_activate(self, SliderBody(self.clone()), enabled))
   }
 }
 
@@ -300,11 +307,53 @@ impl Element for SliderBody {
     };
     let rect = cx.rect();
     let track = Rect::new(rect.x + 12.0, rect.y, (rect.width - 24.0).max(0.0), rect.height);
+
+    if let Some(cb) = self.on_changed.clone() {
+      let state = cx.state::<SliderPointerState>();
+      let id = *state.borrow_mut().region_id.get_or_insert_with(crate::pointer::alloc_region_id);
+      let min = self.min;
+      let max = self.max();
+      let divisions = self.divisions;
+      let state_cb = state.clone();
+      cx.register_pointer(
+        id,
+        std::rc::Rc::new(move |ev: &crate::PointerEvent, r: Rect| {
+          let x = match ev {
+            crate::PointerEvent::Down { pos, button: crate::PointerButton::Primary } => {
+              state_cb.borrow_mut().dragging = true;
+              pos.x
+            }
+            crate::PointerEvent::Move(pos) => {
+              if !state_cb.borrow().dragging {
+                return false;
+              }
+              pos.x
+            }
+            crate::PointerEvent::Up { button: crate::PointerButton::Primary, .. } => {
+              state_cb.borrow_mut().dragging = false;
+              return true;
+            }
+            _ => return false,
+          };
+          let track_w = (r.width - 24.0).max(1.0);
+          let frac = ((x - (r.x + 12.0)) / track_w).clamp(0.0, 1.0);
+          let span = max - min;
+          let mut next = min + frac * span;
+          if let Some(d) = divisions.filter(|d| *d > 0) {
+            let i = ((next - min) / span * d as f32).round();
+            next = (min + i * span / d as f32).clamp(min, max);
+          }
+          cb.call(next);
+          true
+        }),
+      );
+    }
+
     draw_slider(&mut cx.renderer, track, self.fraction(), &colors);
     if cx.is_focused() {
       let color = cx.theme().color_scheme.secondary;
       let rect = cx.rect();
-      draw_focus(&mut cx.renderer, rect, color, 20.0);
+      draw_focus(&mut cx.renderer, rect, color, 6.0);
     }
   }
 }
@@ -384,13 +433,18 @@ impl Element for ChipBox {
     let s = t.color_scheme;
     let r = cx.rect();
     let paint = if self.selected && self.enabled {
-      BoxPaint { color: s.secondary_container, border: None, radius: 8.0, elevation: 0.0 }
+      BoxPaint {
+        color: s.secondary_container,
+        border: Some(Border { color: s.outline, width: 1.0 }),
+        radius: 6.0,
+        elevation: 0.0,
+      }
     } else {
       let border = if self.enabled { s.outline_variant } else { s.on_surface.with_opacity(0.12) };
       BoxPaint {
-        color: Color::TRANSPARENT,
+        color: s.surface,
         border: Some(Border { color: border, width: 1.0 }),
-        radius: 8.0,
+        radius: 6.0,
         elevation: 0.0,
       }
     };
@@ -415,7 +469,7 @@ impl Element for ChipBox {
     }
     if cx.is_focused() {
       let color = s.secondary;
-      draw_focus(&mut cx.renderer, r, color, 8.0);
+      draw_focus(&mut cx.renderer, r, color, 6.0);
     }
   }
 }
@@ -574,7 +628,7 @@ impl Element for MenuAnchor {
     let anchor = cx.layout_child(0, constraints);
     if cx.child_count() > 1 {
       cx.layout_child(1, Constraints::loose(Size::new(280.0, f32::INFINITY)));
-      cx.place_child(1, Offset::new(0.0, anchor.height));
+      cx.place_child(1, Offset::new(0.0, anchor.height + 4.0));
     }
     anchor
   }
@@ -599,15 +653,15 @@ impl Element for MenuPanel {
 
   fn layout(&self, cx: &mut LayoutCx, constraints: Constraints) -> Size {
     let n = cx.child_count();
-    let mut width: f32 = 112.0;
+    let mut width: f32 = 148.0;
     for i in 0..n {
       width = width.max(
         cx.layout_child(i, Constraints::loose(Size::new(constraints.max_width, f32::INFINITY)))
           .width,
       );
     }
-    let width = width.min(constraints.max_width.max(112.0));
-    let mut y = 8.0;
+    let width = width.min(constraints.max_width.max(148.0));
+    let mut y = 4.0;
     for i in 0..n {
       let s = cx.layout_child(
         i,
@@ -621,16 +675,21 @@ impl Element for MenuPanel {
       cx.place_child(i, Offset::new(0.0, y));
       y += s.height;
     }
-    Size::new(width, y + 8.0)
+    Size::new(width, y + 4.0)
   }
 
   fn paint(&self, cx: &mut PaintCx) {
-    let color = cx.theme().color_scheme.surface_container;
+    let s = cx.theme().color_scheme;
     let rect = cx.rect();
     draw_box(
       &mut cx.renderer,
       rect,
-      &BoxPaint { color, border: None, radius: 4.0, elevation: 3.0 },
+      &BoxPaint {
+        color: s.surface,
+        border: Some(Border { color: s.outline_variant, width: 1.0 }),
+        radius: 6.0,
+        elevation: 2.0,
+      },
     );
     focus_on_open(cx);
     cx.paint_children();
@@ -672,43 +731,34 @@ impl Element for MenuItemBody {
   fn layout(&self, cx: &mut LayoutCx, constraints: Constraints) -> Size {
     let t = cx.theme();
     let color = if self.on_pressed.is_some() { t.color_scheme.on_surface } else { disabled_fg(t) };
-    let style = t.text_theme.label_large.clone().with_color(color);
-    cx.set_child_style(style.merge(&TextStyle { bold: Some(false), ..TextStyle::default() }));
-    let left = 12.0 + if self.leading_icon.is_some() { 24.0 + 12.0 } else { 0.0 };
+    let style = t.text_theme.body_medium.clone().with_color(color);
+    cx.set_child_style(style);
+    let left = 12.0 + if self.leading_icon.is_some() { 18.0 + 8.0 } else { 0.0 };
+    let item_h = 34.0;
     let child = cx.layout_child(
       0,
-      Constraints::loose(Size::new((constraints.max_width - left - 12.0).max(0.0), 48.0)),
+      Constraints::loose(Size::new((constraints.max_width - left - 12.0).max(0.0), item_h)),
     );
-    cx.place_child(0, Offset::new(left, (48.0 - child.height) / 2.0));
-    constraints.constrain(Size::new(left + child.width + 12.0, 48.0))
+    cx.place_child(0, Offset::new(left, (item_h - child.height) / 2.0));
+    constraints.constrain(Size::new(left + child.width + 12.0, item_h))
   }
 
   fn paint(&self, cx: &mut PaintCx) {
+    let s = cx.theme().color_scheme;
+    let r = cx.rect();
+    if (cx.is_focused() || cx.is_hovered()) && self.on_pressed.is_some() {
+      cx.renderer.fill_rect(r.deflate(4.0, 1.0, 4.0, 1.0), s.secondary_container, 4.0);
+    }
     if let Some(icon) = self.leading_icon {
-      let color = if self.on_pressed.is_some() {
-        cx.theme().color_scheme.on_surface_variant
-      } else {
-        disabled_fg(cx.theme())
-      };
-      let r = cx.rect();
+      let color = if self.on_pressed.is_some() { s.on_surface_variant } else { disabled_fg(cx.theme()) };
       draw_icon(
         &mut cx.renderer,
-        Rect::new(r.x + 12.0, r.center().y - 12.0, 24.0, 24.0),
+        Rect::new(r.x + 12.0, r.center().y - 9.0, 18.0, 18.0),
         icon,
         color,
       );
     }
-    if cx.is_focused() {
-      let color = cx.theme().color_scheme.on_surface.with_opacity(0.1);
-      let rect = cx.rect();
-      cx.renderer.fill_rect(rect, color, 0.0);
-    }
     cx.paint_children();
-    if cx.is_focused() {
-      let color = cx.theme().color_scheme.secondary;
-      let rect = cx.rect();
-      draw_focus(&mut cx.renderer, rect.inflate(-2.0), color, 0.0);
-    }
   }
 }
 

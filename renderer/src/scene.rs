@@ -1,6 +1,20 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use crate::{DisplayList, DrawCmd, Item, LayerId, Offset, Rect, Renderer, Size};
+
+/// Per-stage timing breakdown of [`Scene::present_timed`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SceneTimings {
+  /// Diffing display lists, computing damage, and flattening draw commands (ms).
+  pub diff_and_flatten_ms: f32,
+  /// Submitting the command batch to the backend (`backend.draw_batch`) (ms).
+  pub raster_ms: f32,
+  /// Number of draw commands submitted to the backend.
+  pub cmd_count: usize,
+  /// Damaged canvas rect, or `None` when nothing changed.
+  pub damage: Option<Rect>,
+}
 
 struct Layer {
   list: DisplayList,
@@ -68,6 +82,12 @@ impl Scene {
   /// Diffs pending layers, computes damage, and sends one clipped batch to `backend` if needed.
   /// Returns the damaged canvas rect, or `None` when nothing changed.
   pub fn present(&mut self, backend: &mut dyn Renderer) -> Option<Rect> {
+    self.present_timed(backend).damage
+  }
+
+  /// Like [`Scene::present`], returning per-stage timing metrics alongside the damaged rect.
+  pub fn present_timed(&mut self, backend: &mut dyn Renderer) -> SceneTimings {
+    let t_start = Instant::now();
     let canvas_size = backend.size();
     let canvas_rect = Rect::from_origin(Offset::ZERO, canvas_size);
     let full_redraw = self.last_size != Some(canvas_size);
@@ -118,7 +138,12 @@ impl Scene {
 
     let damage = damage.intersect(&canvas_rect).round_out().intersect(&canvas_rect);
     if damage.is_empty() {
-      return None;
+      return SceneTimings {
+        diff_and_flatten_ms: t_start.elapsed().as_secs_f32() * 1000.0,
+        raster_ms: 0.0,
+        cmd_count: 0,
+        damage: None,
+      };
     }
 
     let mut cmds = Vec::new();
@@ -147,8 +172,13 @@ impl Scene {
       cmds.clear();
     }
 
+    let diff_and_flatten_ms = t_start.elapsed().as_secs_f32() * 1000.0;
+    let cmd_count = cmds.len();
+    let t_raster = Instant::now();
     backend.draw_batch(damage, &cmds);
-    Some(damage)
+    let raster_ms = t_raster.elapsed().as_secs_f32() * 1000.0;
+
+    SceneTimings { diff_and_flatten_ms, raster_ms, cmd_count, damage: Some(damage) }
   }
 
   fn collect_linked(&self, id: LayerId, out: &mut HashSet<LayerId>) {

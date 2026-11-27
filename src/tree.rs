@@ -14,7 +14,8 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
 use std::rc::Rc;
 
-use crate::layout::{Constraints, LayoutCx, PaintCx, focus, node_state};
+use crate::layout::{Constraints, InteractionState, LayoutCx, PaintCx, focus, node_state};
+use crate::pointer::{self, PointerRegion};
 use crate::render::{LayerId, Offset, Recorder, Rect, Renderer, Scene, Size};
 use crate::signal::{Observer, track, wake};
 use crate::task::with_owner;
@@ -58,14 +59,21 @@ impl Repaint {
 
 #[derive(Clone)]
 pub(crate) enum WalkEvent {
-  Focus { id: String, was_focused: bool },
+  Focus {
+    id: String,
+    was_focused: bool,
+    was_hovered: bool,
+    was_pressed: bool,
+    activate_on_click: bool,
+  },
+  Pointer(PointerRegion),
   Child(usize),
   Overlay(usize),
 }
 
 struct Recorded {
   rect: Rect,
-  focused: bool,
+  interaction: InteractionState,
   style: TextStyle,
   events: Vec<WalkEvent>,
 }
@@ -170,11 +178,19 @@ impl Node {
   /// Puts `widget` (same type as the current one) on this node, built in `context`,
   /// and rebuilds the node, unless both are the very same as before.
   fn update_with(&self, widget: Widget, context: Context) {
-    let unchanged = Rc::ptr_eq(&self.widget.borrow().element, &widget.element)
-      && self.context.borrow().same(&context);
-    if unchanged {
+    let old_widget = self.widget.borrow().clone();
+    let same_ctx = self.context.borrow().same(&context);
+    if same_ctx && Rc::ptr_eq(&old_widget.element, &widget.element) {
       // Same widget value in the same context builds the same thing: keep the subtree.
       // If a signal it read changed, the `update` walk rebuilds it.
+      return;
+    }
+    if same_ctx
+      && let Some(old_any) = old_widget.element.as_any()
+      && !widget.element.should_repaint(old_any)
+    {
+      // Widget explicitly declared its output unchanged (e.g. CustomPainter::should_repaint == false).
+      *self.widget.borrow_mut() = widget;
       return;
     }
     *self.widget.borrow_mut() = widget;
@@ -259,9 +275,14 @@ impl Node {
     *self.kids.borrow_mut() = kids;
   }
 
-  /// Rebuilds the nodes whose signals changed; clean nodes are only walked.
-  /// Returns whether anything was rebuilt.
+  /// Advances active declarative animations and rebuilds nodes whose signals changed;
+  /// clean nodes are only walked. Returns whether anything was rebuilt.
   pub fn update(&self) -> bool {
+    crate::anim::tick_animations();
+    self.update_inner()
+  }
+
+  fn update_inner(&self) -> bool {
     let mut rebuilt = false;
     if self.observer.borrow().is_dirty() {
       self.rebuild();
@@ -270,7 +291,7 @@ impl Node {
     // Children kept by the rebuild (or untouched by it) may be dirty themselves.
     let kids = self.kids.borrow().clone();
     for kid in kids {
-      rebuilt |= kid.update();
+      rebuilt |= kid.update_inner();
     }
     rebuilt
   }
@@ -316,6 +337,26 @@ impl Node {
   /// Lays out if needed, re-records changed nodes into `scene`, and submits the damaged batch.
   /// Returns the damaged rect, or `None` when nothing changed.
   pub fn present(&self, scene: &mut Scene, backend: &mut dyn Renderer) -> Option<Rect> {
+    self.present_inner(scene, backend, true)
+  }
+
+  /// Like [`Node::present`], without touching the global keyboard focus ring.
+  /// Used for standalone overlay trees (e.g. `PerfLayer`) rendered to a separate renderer.
+  #[cfg(debug_assertions)]
+  pub(crate) fn present_isolated(
+    &self,
+    scene: &mut Scene,
+    backend: &mut dyn Renderer,
+  ) -> Option<Rect> {
+    self.present_inner(scene, backend, false)
+  }
+
+  fn present_inner(
+    &self,
+    scene: &mut Scene,
+    backend: &mut dyn Renderer,
+    manage_focus: bool,
+  ) -> Option<Rect> {
     let removed = std::mem::take(&mut self.tree.borrow_mut().removed_layers);
     for id in removed {
       scene.remove(id);
@@ -339,25 +380,86 @@ impl Node {
     scene.set_root(BACKDROP_LAYER);
     scene.set(BACKDROP_LAYER, backdrop.finish());
 
-    focus::begin_frame();
-    let mut overlays = VecDeque::new();
-    self.walk_paint(Offset::ZERO, false, scene, backend, &mut overlays);
-    while let Some((node, origin, focused)) = overlays.pop_front() {
-      node.walk_paint(origin, focused, scene, backend, &mut overlays);
+    if manage_focus {
+      focus::begin_frame();
+      pointer::begin_frame();
     }
-    focus::end_frame();
+    let mut overlays = VecDeque::new();
+    self.walk_paint(Offset::ZERO, InteractionState::default(), scene, backend, &mut overlays);
+    while let Some((node, origin, interaction)) = overlays.pop_front() {
+      node.walk_paint(origin, interaction, scene, backend, &mut overlays);
+    }
+    if manage_focus {
+      focus::end_frame();
+    }
 
     scene.present(backend)
+  }
+
+  /// Like [`Node::present`], also returning per-phase [`FrameTimings`](crate::FrameTimings).
+  #[cfg(debug_assertions)]
+  pub fn present_timed(
+    &self,
+    scene: &mut Scene,
+    backend: &mut dyn Renderer,
+  ) -> (Option<Rect>, crate::FrameTimings) {
+    let removed = std::mem::take(&mut self.tree.borrow_mut().removed_layers);
+    for id in removed {
+      scene.remove(id);
+    }
+
+    let size = backend.size();
+    let relayout = {
+      let mut tree = self.tree.borrow_mut();
+      let need = tree.layout_dirty || tree.last_size != Some(size);
+      tree.layout_dirty = false;
+      tree.last_size = Some(size);
+      need
+    };
+    let t_layout = std::time::Instant::now();
+    if relayout {
+      self.layout(Constraints::tight(size), backend, &TextStyle::default());
+    }
+    let layout_ms = t_layout.elapsed().as_secs_f32() * 1000.0;
+
+    let t_paint = std::time::Instant::now();
+    let mut backdrop = Recorder::new(backend);
+    backdrop.clear(ThemeData::of(&self.context.borrow()).color_scheme.surface);
+    backdrop.child(self.layer_id);
+    scene.set_root(BACKDROP_LAYER);
+    scene.set(BACKDROP_LAYER, backdrop.finish());
+
+    focus::begin_frame();
+    pointer::begin_frame();
+    let mut overlays = VecDeque::new();
+    self.walk_paint(Offset::ZERO, InteractionState::default(), scene, backend, &mut overlays);
+    while let Some((node, origin, interaction)) = overlays.pop_front() {
+      node.walk_paint(origin, interaction, scene, backend, &mut overlays);
+    }
+    focus::end_frame();
+    let paint_ms = t_paint.elapsed().as_secs_f32() * 1000.0;
+
+    let st = scene.present_timed(backend);
+    let timings = crate::FrameTimings {
+      update_ms: 0.0,
+      layout_ms,
+      paint_ms,
+      scene_ms: st.diff_and_flatten_ms,
+      raster_ms: st.raster_ms,
+      present_ms: 0.0,
+      cmd_count: st.cmd_count,
+    };
+    (st.damage, timings)
   }
 
   /// Walks this node for retained painting, re-recording its layer only when invalidated.
   pub(crate) fn walk_paint(
     &self,
     parent_origin: Offset,
-    focused: bool,
+    interaction: InteractionState,
     scene: &mut Scene,
     backend: &dyn Renderer,
-    overlays: &mut VecDeque<(Rc<Node>, Offset, bool)>,
+    overlays: &mut VecDeque<(Rc<Node>, Offset, InteractionState)>,
   ) {
     let rect = self.rect_in(parent_origin);
     let style = self.style.borrow().clone();
@@ -365,15 +467,20 @@ impl Node {
 
     let cached_events = if !self.paint_dirty.get() {
       self.recorded.borrow().as_ref().and_then(|rec| {
-        if rec.rect != rect || rec.focused != focused || rec.style != style {
+        if rec.rect != rect || rec.interaction != interaction || rec.style != style {
           return None;
         }
         let mut pending = focus::is_pending();
         for event in &rec.events {
-          if let WalkEvent::Focus { id, was_focused } = event {
-            let now = pending || global_events.is_focused(id);
+          if let WalkEvent::Focus { id, was_focused, was_hovered, was_pressed, .. } = event {
+            let now_focused = pending || global_events.is_focused(id);
             pending = false;
-            if now != *was_focused {
+            let now_hovered = pointer::is_focus_hovered(id);
+            let now_pressed = pointer::is_focus_pressed(id);
+            if now_focused != *was_focused
+              || now_hovered != *was_hovered
+              || now_pressed != *was_pressed
+            {
               return None;
             }
           }
@@ -385,17 +492,23 @@ impl Node {
     };
 
     if let Some(events) = cached_events {
-      let mut cur_focused = focused;
+      let mut cur = interaction;
       for event in events {
         match event {
-          WalkEvent::Focus { id, .. } => {
-            cur_focused |= focus::register(&id, rect);
+          WalkEvent::Focus { id, activate_on_click, .. } => {
+            cur.focused |= focus::register(&id, rect);
+            pointer::register_focus_target(&id, rect, activate_on_click);
+            cur.hovered |= pointer::is_focus_hovered(&id);
+            cur.pressed |= pointer::is_focus_pressed(&id);
+          }
+          WalkEvent::Pointer(region) => {
+            pointer::register_region(region);
           }
           WalkEvent::Child(i) => {
-            kids[i].walk_paint(rect.origin(), cur_focused, scene, backend, overlays);
+            kids[i].walk_paint(rect.origin(), cur, scene, backend, overlays);
           }
           WalkEvent::Overlay(i) => {
-            overlays.push_back((kids[i].clone(), rect.origin(), cur_focused));
+            overlays.push_back((kids[i].clone(), rect.origin(), cur));
           }
         }
       }
@@ -414,7 +527,8 @@ impl Node {
         kids: &kids,
         theme: &theme,
         style: &style,
-        focused,
+        interaction,
+        paint_dirty: &self.paint_dirty,
         state: &self.state,
         backend,
         scene,
@@ -425,7 +539,7 @@ impl Node {
       cx.renderer.finish()
     });
     scene.set(self.layer_id, list);
-    *self.recorded.borrow_mut() = Some(Recorded { rect, focused, style, events });
+    *self.recorded.borrow_mut() = Some(Recorded { rect, interaction, style, events });
   }
 
   /// Prints the widget tree (one line per node); never calls `build`.

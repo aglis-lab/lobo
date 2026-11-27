@@ -33,7 +33,6 @@ use crate::layout::{Constraints, LayoutCx, PaintCx, focus};
 use crate::render::{Renderer, Scene, Size};
 use crate::signal::set_waker;
 use crate::task::TaskGroup;
-use crate::term::{Input, InputMode, RawTerminal, spawn_line_reader};
 use crate::tree::{Node, NodeCx};
 use crate::{EventKey, EventResult, keys};
 
@@ -259,6 +258,17 @@ pub trait Element {
   fn parent_data(&self) -> Option<Box<dyn std::any::Any>> {
     None
   }
+
+  /// Optional downcast support for [`Element::should_repaint`].
+  fn as_any(&self) -> Option<&dyn std::any::Any> {
+    None
+  }
+
+  /// Returns `true` when replacing `old` with `self` on the same node requires
+  /// rebuilding/repainting. Returning `false` preserves the cached display list.
+  fn should_repaint(&self, _old: &dyn std::any::Any) -> bool {
+    true
+  }
 }
 
 /// Cheaply clonable handle to any element, with the element's type and an optional key.
@@ -390,14 +400,11 @@ pub fn dispatch_event(event: &EventKey) -> EventResult {
   result
 }
 
-/// Mounts the tree once, then loops on this thread: key presses are dispatched,
-/// and any signal change or `Repaint::mark()` wakes the loop to rebuild, lay out,
-/// re-record changed layers, and present the damaged region to `backend`. `exit()`,
-/// Ctrl+C, Ctrl+D or the end of input quits.
+/// Mounts the tree once, then loops on this thread: line input from stdin is dispatched
+/// as key presses, and any signal change or `Repaint::mark()` wakes the loop to rebuild,
+/// lay out, re-record changed layers, and present the damaged region to `backend`.
+/// `exit()` or EOF quits.
 ///
-/// When stdin and stdout are terminals, input is raw: every key acts at once, on the
-/// alternate screen, and the terminal is restored on exit. Otherwise (piped input, or
-/// `LOBO_INPUT=line`) it is read a line at a time; see `InputMode`.
 /// Tab moves the keyboard focus; Enter or space activates the focused widget.
 pub fn run(app: impl Into<Widget>, backend: &mut dyn Renderer) {
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -425,25 +432,17 @@ async fn run_loop(app: Widget, backend: &mut dyn Renderer) {
   EXIT_NOTIFIER.with(|n| *n.borrow_mut() = Some(exit_notify.clone()));
 
   // Input is read on its own thread and arrives over a channel.
-  let (tx, mut inputs) = tokio::sync::mpsc::unbounded_channel::<Input>();
-  let mut input_mode = InputMode::from_env();
-  // Dropped when this function returns, which restores the terminal.
-  let mut _raw = None;
-  if input_mode == InputMode::Raw {
-    match RawTerminal::enter() {
-      Ok(raw) => {
-        raw.spawn_reader(tx.clone());
-        _raw = Some(raw);
-      }
-      Err(e) => {
-        log::warn!("raw terminal mode unavailable ({e}); reading lines instead");
-        input_mode = InputMode::Line;
+  let (tx, mut inputs) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+  std::thread::spawn(move || {
+    use std::io::BufRead;
+    for line in std::io::stdin().lock().lines() {
+      let Ok(line) = line else { break };
+      if tx.send(Some(line)).is_err() {
+        return;
       }
     }
-  }
-  if input_mode == InputMode::Line {
-    spawn_line_reader(tx);
-  }
+    let _ = tx.send(None);
+  });
 
   root.present(&mut scene, backend);
   loop {
@@ -452,14 +451,9 @@ async fn run_loop(app: Widget, backend: &mut dyn Renderer) {
         return;
       }
       input = inputs.recv() => {
-        let keys = match input {
-          None | Some(Input::Quit) => return,
-          Some(Input::Key(key)) => vec![key],
-          Some(Input::Line(line)) => parse_keys(&line).into_iter().map(EventKey::new).collect(),
-          Some(Input::Resize) => Vec::new(),
-        };
-        for key in keys {
-          dispatch_event(&key);
+        let Some(Some(line)) = input else { return };
+        for ch in parse_keys(&line) {
+          dispatch_event(&EventKey::new(ch));
           // Rebuild so the next key of the same line reaches the updated widgets.
           root.update();
         }

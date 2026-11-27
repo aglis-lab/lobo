@@ -521,11 +521,23 @@ impl Element for Icon {
 // ListView
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 struct ScrollState {
-  offset: f32,
+  offset: crate::Signal<f32>,
+  max_offset: f32,
   /// Canvas rect of the viewport in the last frame.
   viewport: Rect,
+  region_id: Option<u64>,
+}
+
+impl Default for ScrollState {
+  fn default() -> Self {
+    ScrollState {
+      offset: crate::Signal::new(0.0),
+      max_offset: 0.0,
+      viewport: Rect::ZERO,
+      region_id: None,
+    }
+  }
 }
 
 /// A vertically scrolling list. It scrolls to keep the keyboard-focused child visible,
@@ -573,13 +585,15 @@ impl Element for ListView {
     let state = cx.state::<ScrollState>();
     let mut st = state.borrow_mut();
     let max_offset = (content - size.height).max(0.0);
-    let mut offset = self.scroll_offset.unwrap_or(st.offset);
+    st.max_offset = max_offset;
+    let cur_offset = st.offset.get();
+    let mut offset = self.scroll_offset.unwrap_or(cur_offset);
     if self.scroll_offset.is_none() {
       // Keep the focused widget (as of the last frame) in view, if it's inside this list.
       if let Some(f) = focus::current_rect() {
         let vp = st.viewport;
         let in_list = f.x >= vp.x && f.right() <= vp.right() + 0.5 && !vp.is_empty();
-        let content_top = vp.y - st.offset;
+        let content_top = vp.y - cur_offset;
         if in_list && f.y >= content_top && f.bottom() <= content_top + content + 0.5 {
           if f.y < vp.y {
             offset -= vp.y - f.y;
@@ -590,7 +604,9 @@ impl Element for ListView {
       }
     }
     let offset = offset.clamp(0.0, max_offset);
-    st.offset = offset;
+    if (offset - cur_offset).abs() > 0.01 {
+      st.offset.set(offset);
+    }
     for (i, (top, _)) in tops.iter().enumerate() {
       cx.place_child(i, Offset::new(self.padding.left, top - offset));
     }
@@ -599,7 +615,29 @@ impl Element for ListView {
 
   fn paint(&self, cx: &mut PaintCx) {
     let rect = cx.rect();
-    cx.state::<ScrollState>().borrow_mut().viewport = rect;
+    let state = cx.state::<ScrollState>();
+    let id = {
+      let mut st = state.borrow_mut();
+      st.viewport = rect;
+      *st.region_id.get_or_insert_with(crate::pointer::alloc_region_id)
+    };
+    if self.scroll_offset.is_none() {
+      let st_cb = state.clone();
+      cx.register_pointer(
+        id,
+        std::rc::Rc::new(move |ev: &crate::PointerEvent, _| {
+          if let crate::PointerEvent::Scroll { delta_y, .. } = ev {
+            let st = st_cb.borrow();
+            let next = (st.offset.peek() + *delta_y).clamp(0.0, st.max_offset);
+            if (next - st.offset.peek()).abs() > 0.01 {
+              st.offset.set(next);
+              return true;
+            }
+          }
+          false
+        }),
+      );
+    }
     cx.renderer.push_clip(rect);
     cx.paint_children();
     cx.renderer.pop_clip();

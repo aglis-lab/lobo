@@ -90,7 +90,9 @@ impl Element for NavItem {
     let r = cx.rect();
     let pill = self.indicator(r);
     if self.selected {
-      cx.renderer.fill_rect(pill, s.secondary_container, 16.0);
+      cx.renderer.fill_rect(pill, s.secondary_container, 6.0);
+    } else if cx.is_hovered() {
+      cx.renderer.fill_rect(pill, s.secondary_container.with_opacity(0.6), 6.0);
     }
     let icon_color = if self.selected { s.on_secondary_container } else { s.on_surface_variant };
     let label_style = if self.style == NavStyle::Drawer {
@@ -135,7 +137,7 @@ impl Element for NavItem {
     }
     if cx.is_focused() {
       let color = s.secondary;
-      draw_focus(&mut cx.renderer, pill, color, 16.0);
+      draw_focus(&mut cx.renderer, pill, color, 6.0);
     }
   }
 }
@@ -178,9 +180,15 @@ impl Element for NavigationBar {
   }
 
   fn paint(&self, cx: &mut PaintCx) {
-    let color = cx.theme().color_scheme.surface_container;
+    let s = cx.theme().color_scheme;
     let rect = cx.rect();
-    cx.renderer.fill_rect(rect, color, 0.0);
+    cx.renderer.fill_rect(rect, s.surface, 0.0);
+    cx.renderer.draw_line(
+      Offset::new(rect.x, rect.y + 0.5),
+      Offset::new(rect.right(), rect.y + 0.5),
+      s.outline_variant,
+      1.0,
+    );
     cx.paint_children();
   }
 }
